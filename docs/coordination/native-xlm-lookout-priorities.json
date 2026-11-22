@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "Horizon transport source is written but its focused check remains unallocated while the existing coordination question is pending. Disk headroom is sufficient; available capacity alone is not an allocation.",
-      "nextAction": "When a shared slot and the coordination answer are available, run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) under a fresh allocation. Source stays frozen.",
+      "blockedReason": "Horizon transport source is written but its focused check remains unallocated. Rob approved Cody–Mara coordination messages; Cody has been notified to check current capacity and issue a fresh source-bound allocation.",
+      "nextAction": "After Cody issues a fresh capacity-checked allocation, run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c). Do not reuse any prior allocation; source stays frozen.",
       "cardIds": [
         "WP3"
       ]
@@ -65,7 +65,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "Local withdrawal-to-claim and settlement-helper checks passed, but the integrated XLM settlement driver and real provider/signature binding remain incomplete. No live payout is proved; production XLM stays Frozen.",
-      "nextAction": "Validate the unbuilt Horizon transport under the prepared runner after the existing coordination answer and a fresh shared allocation; then implement the driver using native-xlm-settlement-driver-handoff.md and its mocked acceptance cases.",
+      "nextAction": "Validate the unbuilt Horizon transport under the prepared runner after a fresh shared allocation; then implement the driver using native-xlm-settlement-driver-handoff.md and its mocked acceptance cases. Cody–Mara coordination is now approved.",
       "cardIds": [
         "WP4"
       ]
@@ -85,7 +85,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Next validation is the prepared 22-test Horizon transport batch plus production compile check for 843e4e1c (runner 67e9d11c), awaiting the existing coordination answer and fresh allocation. Preserve earlier local passes; then complete driver wiring and mocked integration before assessing live testnet readiness.",
+      "nextAction": "Next validation is the prepared 22-test Horizon transport batch plus production compile check for 843e4e1c (runner 67e9d11c), awaiting fresh allocation. Rob approved Cody–Mara coordination. Preserve earlier local passes; then complete driver wiring and mocked integration before assessing live testnet readiness.",
       "cardIds": [
         "WP6"
       ]

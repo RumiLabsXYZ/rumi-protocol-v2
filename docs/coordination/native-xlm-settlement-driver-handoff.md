@@ -28,7 +28,7 @@ Written 2026-11-14 at `cfeebf55` (source unchanged since `843e4e1c`). Docs only.
 
 ## Status
 
-Validation of the transport source (`843e4e1c`, runner `67e9d11c`) remains unallocated while an existing coordination question is pending. Sufficient disk or an idle resource slot does not grant an allocation. No compiler or live action has run for this transport source.
+Validation of the transport source (`843e4e1c`, runner `67e9d11c`) remains unallocated. Rob has now approved the existing Cody–Mara coordination messaging decision, and Cody was notified to check capacity and arrange a fresh grant. Sufficient disk or an idle resource slot does not grant an allocation. No compiler or live action has run for this transport source.
 
 ## Material-update closeout
 
