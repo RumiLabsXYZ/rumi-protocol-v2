@@ -1,0 +1,532 @@
+export const idlFactory = ({ IDL }) => {
+  const InitArgs = IDL.Record({
+    'admin' : IDL.Opt(IDL.Principal),
+    'excluded_principals' : IDL.Opt(IDL.Vec(IDL.Principal)),
+    'snapshot_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'season_start_ns' : IDL.Opt(IDL.Nat64),
+    'season_end_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const FiatStablePointsPolicy = IDL.Record({
+    'legacy_epoch' : IDL.Opt(IDL.Nat64),
+    'active_for_current_epoch' : IDL.Bool,
+    'historical_next_offset' : IDL.Nat64,
+    'cutover_epoch' : IDL.Opt(IDL.Nat64),
+    'inline_legacy_topup_rows' : IDL.Nat64,
+    'historical_ledger_cutoff' : IDL.Opt(IDL.Nat64),
+    'inline_legacy_topups_complete' : IDL.Bool,
+    'historical_complete' : IDL.Bool,
+  });
+  const Result = IDL.Variant({
+    'Ok' : FiatStablePointsPolicy,
+    'Err' : IDL.Text,
+  });
+  const PointsError = IDL.Variant({
+    'Unauthorized' : IDL.Null,
+    'Excluded' : IDL.Null,
+  });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
+  const ForwardStatus = IDL.Record({
+    'pending_start_ns' : IDL.Nat64,
+    'active_start_ns' : IDL.Opt(IDL.Nat64),
+    'archived_participants' : IDL.Nat64,
+    'active_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'pending_end_ns' : IDL.Opt(IDL.Nat64),
+    'prepared_at_ns' : IDL.Nat64,
+    'active_end_ns' : IDL.Opt(IDL.Nat64),
+    'archive_digest' : IDL.Vec(IDL.Nat8),
+    'archived_snapshot_rows' : IDL.Nat64,
+    'active_epoch' : IDL.Opt(IDL.Nat64),
+    'backup_snapshot_id' : IDL.Vec(IDL.Nat8),
+    'expires_at_ns' : IDL.Nat64,
+    'archived_epoch' : IDL.Nat64,
+  });
+  const Result_2 = IDL.Variant({ 'Ok' : ForwardStatus, 'Err' : IDL.Text });
+  const OutageProgressView = IDL.Record({
+    'scanned_through' : IDL.Nat64,
+    'allocation_digest' : IDL.Vec(IDL.Nat8),
+    'rows_total' : IDL.Nat32,
+    'ledger_cutoff' : IDL.Nat64,
+    'credited_points' : IDL.Nat,
+    'complete' : IDL.Bool,
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+    'original_ledger_prefix_len' : IDL.Nat64,
+    'rows_applied' : IDL.Nat32,
+  });
+  const OutageReconciliationStatus = IDL.Record({
+    'progress' : IDL.Opt(OutageProgressView),
+    'audit_count_matches_receipts' : IDL.Bool,
+    'configured_allocation_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'credit_log_len' : IDL.Nat64,
+  });
+  const Result_3 = IDL.Variant({
+    'Ok' : OutageReconciliationStatus,
+    'Err' : IDL.Text,
+  });
+  const Result_4 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const Result_5 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const AllocationRow = IDL.Record({
+    'principal' : IDL.Principal,
+    'epoch_index' : IDL.Nat64,
+    'coverage_end_ns' : IDL.Opt(IDL.Nat64),
+    'target_epoch_points' : IDL.Nat,
+    'coverage_start_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const OutageAllocation = IDL.Record({
+    'rows' : IDL.Vec(AllocationRow),
+    'original_ledger_prefix_digest' : IDL.Vec(IDL.Nat8),
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+    'season_start_ns' : IDL.Nat64,
+    'original_ledger_prefix_len' : IDL.Nat64,
+    'season_end_ns' : IDL.Nat64,
+  });
+  const FiatStableTopupProgress = IDL.Record({
+    'credited_rows' : IDL.Nat32,
+    'processed_rows' : IDL.Nat32,
+    'credited_points' : IDL.Nat,
+    'complete' : IDL.Bool,
+    'next_offset' : IDL.Nat64,
+  });
+  const Result_6 = IDL.Variant({
+    'Ok' : FiatStableTopupProgress,
+    'Err' : IDL.Text,
+  });
+  const Status = IDL.Record({
+    'rows' : IDL.Nat32,
+    'credited_points' : IDL.Nat,
+    'complete' : IDL.Bool,
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+  });
+  const Result_7 = IDL.Variant({ 'Ok' : Status, 'Err' : IDL.Text });
+  const Season2Receipt = IDL.Record({
+    'principal' : IDL.Principal,
+    'category_points' : IDL.Vec(IDL.Nat),
+  });
+  const Season2ImportStatus = IDL.Record({
+    'unresolved_categories' : IDL.Nat8,
+    'batch_digests' : IDL.Vec(IDL.Vec(IDL.Nat8)),
+    'source_canisters' : IDL.Vec(IDL.Tuple(IDL.Nat8, IDL.Principal)),
+    'credited_points' : IDL.Nat,
+    'expected_rows' : IDL.Nat32,
+    'logical_start_ns' : IDL.Nat64,
+    'complete' : IDL.Bool,
+    'imported_rows' : IDL.Nat32,
+    'source_cursors' : IDL.Vec(IDL.Nat64),
+    'provenance_digest' : IDL.Vec(IDL.Nat8),
+    'receipts' : IDL.Vec(Season2Receipt),
+    'cutoff_ns' : IDL.Nat64,
+  });
+  const Result_8 = IDL.Variant({
+    'Ok' : Season2ImportStatus,
+    'Err' : IDL.Text,
+  });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
+  const EpochSummary = IDL.Record({
+    'epoch_index' : IDL.Nat64,
+    'points_accrued_this_epoch' : IDL.Nat,
+    'epoch_start_ns' : IDL.Nat64,
+    'registered_principals' : IDL.Nat64,
+    'active_principals' : IDL.Nat64,
+    'total_points_all' : IDL.Nat,
+    'snapshot_a_ns' : IDL.Nat64,
+    'snapshot_b_ns' : IDL.Nat64,
+    'epoch_end_ns' : IDL.Nat64,
+  });
+  const PublicOpenEpoch = IDL.Record({
+    'epoch_index' : IDL.Nat64,
+    'epoch_start_ns' : IDL.Nat64,
+    'snapshot_a_ns' : IDL.Opt(IDL.Nat64),
+    'snapshot_b_ns' : IDL.Opt(IDL.Nat64),
+    'epoch_end_ns' : IDL.Nat64,
+  });
+  const PublicEpochStatus = IDL.Record({
+    'open_epoch' : IDL.Opt(PublicOpenEpoch),
+    'snapshot_seed_committed' : IDL.Bool,
+    'driver_interval_secs' : IDL.Nat64,
+    'revealed_seed_count' : IDL.Nat64,
+    'current_epoch_index' : IDL.Nat64,
+    'driver_enabled' : IDL.Bool,
+  });
+  const OpenEpoch = IDL.Record({
+    'close_active' : IDL.Nat64,
+    'close_cursor' : IDL.Opt(IDL.Principal),
+    'epoch_index' : IDL.Nat64,
+    'epoch_start_ns' : IDL.Nat64,
+    'a_cursor' : IDL.Opt(IDL.Principal),
+    'b_complete' : IDL.Bool,
+    'b_cursor' : IDL.Opt(IDL.Principal),
+    'close_started' : IDL.Bool,
+    'a_complete' : IDL.Bool,
+    'snapshot_a_ns' : IDL.Nat64,
+    'snapshot_b_ns' : IDL.Nat64,
+    'close_points_accrued' : IDL.Nat,
+    'epoch_end_ns' : IDL.Nat64,
+  });
+  const EpochStatus = IDL.Record({
+    'legacy_transition_held' : IDL.Bool,
+    'open_epoch' : IDL.Opt(OpenEpoch),
+    'snapshot_seed_committed' : IDL.Bool,
+    'driver_interval_secs' : IDL.Nat64,
+    'legacy_reseed_pending' : IDL.Bool,
+    'revealed_seed_count' : IDL.Nat64,
+    'current_epoch_index' : IDL.Nat64,
+    'driver_enabled' : IDL.Bool,
+  });
+  const HeldEpochRecoveryView = IDL.Record({
+    'closed' : IDL.Bool,
+    'epoch_index' : IDL.Nat64,
+    'replacement_b_ns' : IDL.Opt(IDL.Nat64),
+    'kind' : IDL.Text,
+    'epoch_start_ns' : IDL.Nat64,
+    'authorized_at_ns' : IDL.Nat64,
+    'original_b_ns' : IDL.Opt(IDL.Nat64),
+    'snapshot_a_ns' : IDL.Nat64,
+    'epoch_end_ns' : IDL.Nat64,
+  });
+  const SourceStatus = IDL.Record({
+    'tag' : IDL.Nat8,
+    'cursor' : IDL.Nat64,
+    'canister' : IDL.Principal,
+  });
+  const IngestStatus = IDL.Record({
+    'registered_count' : IDL.Nat64,
+    'poll_interval_secs' : IDL.Nat64,
+    'poll_enabled' : IDL.Bool,
+    'sources' : IDL.Vec(SourceStatus),
+  });
+  const LeaderboardEntry = IDL.Record({
+    'principal' : IDL.Principal,
+    'total_points' : IDL.Nat,
+    'rank' : IDL.Nat32,
+    'estimated_share_bps' : IDL.Nat32,
+  });
+  const OutageCreditKind = IDL.Variant({ 'OutageMakeWhole' : IDL.Null });
+  const OutageCredit = IDL.Record({
+    'principal' : IDL.Principal,
+    'normal_ledger_cutoff' : IDL.Nat64,
+    'scheduled_period_end_ns' : IDL.Nat64,
+    'applied_at_ns' : IDL.Nat64,
+    'epoch_index' : IDL.Nat64,
+    'coverage_end_ns' : IDL.Opt(IDL.Nat64),
+    'allocation_digest' : IDL.Vec(IDL.Nat8),
+    'kind' : OutageCreditKind,
+    'normal_points_earned' : IDL.Nat,
+    'credited_points' : IDL.Nat,
+    'target_epoch_points' : IDL.Nat,
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+    'coverage_start_ns' : IDL.Opt(IDL.Nat64),
+    'scheduled_period_start_ns' : IDL.Nat64,
+  });
+  const OutageCreditPage = IDL.Record({
+    'reached_end' : IDL.Bool,
+    'entries' : IDL.Vec(OutageCredit),
+    'next_offset' : IDL.Nat64,
+  });
+  const PointSource = IDL.Variant({
+    'CkStable3PoolMatched' : IDL.Null,
+    'Registration' : IDL.Null,
+    'CkStable3PoolFlat4x' : IDL.Null,
+    'CkStable3PoolUnmatched' : IDL.Null,
+    'CkStable3PoolUnmatchedTopUp' : IDL.Null,
+    'VaultRepayment' : IDL.Null,
+    'IcUsd3Pool' : IDL.Null,
+    'AmmLp' : IDL.Null,
+    'IcUsdStabilityPool' : IDL.Null,
+    'IcUsdDebt' : IDL.Null,
+    'ThreeUsdStabilityPool' : IDL.Null,
+  });
+  const PointEntry = IDL.Record({
+    'principal' : IDL.Principal,
+    'epoch_index' : IDL.Nat64,
+    'source' : PointSource,
+    'recorded_at_ns' : IDL.Nat64,
+    'points_delta' : IDL.Nat,
+  });
+  const PointEntryPage = IDL.Record({
+    'reached_end' : IDL.Bool,
+    'entries' : IDL.Vec(PointEntry),
+    'next_offset' : IDL.Nat64,
+  });
+  const PointsConfig = IDL.Record({
+    'admin' : IDL.Principal,
+    'registered_count' : IDL.Nat64,
+    'snapshot_seed_committed' : IDL.Bool,
+    'excluded_count' : IDL.Nat32,
+    'season_start_ns' : IDL.Nat64,
+    'season_end_ns' : IDL.Nat64,
+    'current_epoch_index' : IDL.Nat64,
+  });
+  const RecoveryCoverage = IDL.Record({
+    'participants' : IDL.Vec(IDL.Principal),
+    'normal_end_ns' : IDL.Opt(IDL.Nat64),
+    'normal_epoch' : IDL.Opt(IDL.Nat64),
+    'authorized_at_ns' : IDL.Nat64,
+    'predecessor_next_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'predecessor_epoch' : IDL.Nat64,
+    'bridge_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'missed_start_ns' : IDL.Nat64,
+    'season_start_ns' : IDL.Nat64,
+    'predecessor_summary_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'season_end_ns' : IDL.Nat64,
+    'normal_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'normal_start_ns' : IDL.Opt(IDL.Nat64),
+  });
+  const AssetType = IDL.Variant({
+    'Icp' : IDL.Null,
+    'IcUsd' : IDL.Null,
+    'CkUsdc' : IDL.Null,
+    'CkUsdt' : IDL.Null,
+    'ThreeUsd' : IDL.Null,
+  });
+  const RepaymentEvent = IDL.Record({
+    'asset' : AssetType,
+    'repaid_at' : IDL.Nat64,
+    'amount_usd' : IDL.Nat,
+    'window_end' : IDL.Nat64,
+  });
+  const QualifyingAction = IDL.Variant({
+    'ProvideAmmLiquidity' : IDL.Null,
+    'MintIcUsd' : IDL.Null,
+    'Deposit3Pool' : IDL.Null,
+    'DepositStabilityPool' : IDL.Null,
+    'RepayVault' : IDL.Null,
+  });
+  const Venue = IDL.Variant({
+    'Amm' : IDL.Null,
+    'ThreePool' : IDL.Null,
+    'Vault' : IDL.Null,
+    'StabilityPool' : IDL.Null,
+  });
+  const DepositKey = IDL.Record({ 'asset' : AssetType, 'venue' : Venue });
+  const DepositRecord = IDL.Record({
+    'asset' : AssetType,
+    'venue' : Venue,
+    'last_verified_at' : IDL.Nat64,
+    'deposited_at' : IDL.Nat64,
+    'recorded_value_usd' : IDL.Nat,
+  });
+  const PrincipalState = IDL.Record({
+    'principal' : IDL.Principal,
+    'registered_at_ns' : IDL.Nat64,
+    'total_points' : IDL.Nat,
+    'repayment_events' : IDL.Vec(RepaymentEvent),
+    'first_qualifying_action' : QualifyingAction,
+    'active_deposits' : IDL.Vec(IDL.Tuple(DepositKey, DepositRecord)),
+    'last_epoch_processed' : IDL.Nat64,
+  });
+  const RegistrationInfo = IDL.Record({
+    'principal' : IDL.Principal,
+    'registered_at_ns' : IDL.Nat64,
+    'first_qualifying_action' : QualifyingAction,
+  });
+  const RevealedSeed = IDL.Record({
+    'revealed_at_ns' : IDL.Nat64,
+    'epoch_index' : IDL.Nat64,
+    'derivation_entropy' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'seed' : IDL.Vec(IDL.Nat8),
+    'snapshot_time_a_ns' : IDL.Nat64,
+    'snapshot_time_b_ns' : IDL.Nat64,
+  });
+  const Result_9 = IDL.Variant({ 'Ok' : IDL.Vec(IDL.Nat8), 'Err' : IDL.Text });
+  const Season2ImportRow = IDL.Record({
+    'principal_state' : PrincipalState,
+    'category_points' : IDL.Vec(IDL.Nat),
+  });
+  const Result_10 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  return IDL.Service({
+    'activate_fiat_stable_4x' : IDL.Func([], [Result], []),
+    'add_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'admin_activate_season2_forward' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result_2],
+        [],
+      ),
+    'admin_continue_outage_reconciliation' : IDL.Func([], [Result_3], []),
+    'admin_poll_held_points_backlog' : IDL.Func([], [Result_4], []),
+    'admin_prepare_season2_forward' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result_2],
+        [],
+      ),
+    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_4], []),
+    'admin_resume_held_points' : IDL.Func([], [Result_5], []),
+    'admin_resume_points_recovery_v2' : IDL.Func([], [Result_5], []),
+    'admin_stage_outage_allocation' : IDL.Func(
+        [OutageAllocation],
+        [Result_3],
+        [],
+      ),
+    'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_6], []),
+    'apply_season1_final_supplement' : IDL.Func([], [Result_7], []),
+    'begin_season2_backfill' : IDL.Func([IDL.Nat32], [Result_8], []),
+    'begin_season2_import' : IDL.Func([IDL.Nat32], [Result_8], []),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'finish_season2_backfill' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_8], []),
+    'finish_season2_import' : IDL.Func(
+        [IDL.Vec(IDL.Nat64), IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [Result_8],
+        [],
+      ),
+    'force_epoch_tick' : IDL.Func([], [Result_1], []),
+    'get_asset_ledgers' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Tuple(IDL.Nat8, IDL.Principal))],
+        ['query'],
+      ),
+    'get_epoch_history' : IDL.Func(
+        [IDL.Nat32, IDL.Nat32],
+        [IDL.Vec(EpochSummary)],
+        ['query'],
+      ),
+    'get_epoch_status' : IDL.Func([], [PublicEpochStatus], ['query']),
+    'get_epoch_status_admin' : IDL.Func([], [EpochStatus], ['query']),
+    'get_excluded_principals' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Principal)],
+        ['query'],
+      ),
+    'get_fiat_stable_points_policy' : IDL.Func(
+        [],
+        [FiatStablePointsPolicy],
+        ['query'],
+      ),
+    'get_held_epoch_recovery' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(HeldEpochRecoveryView)],
+        ['query'],
+      ),
+    'get_ingest_status' : IDL.Func([], [IngestStatus], ['query']),
+    'get_leaderboard' : IDL.Func(
+        [IDL.Nat32, IDL.Nat32],
+        [IDL.Vec(LeaderboardEntry)],
+        ['query'],
+      ),
+    'get_outage_credit_entries' : IDL.Func(
+        [IDL.Nat64, IDL.Nat32],
+        [OutageCreditPage],
+        ['query'],
+      ),
+    'get_outage_credit_len' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_outage_reconciliation_status' : IDL.Func(
+        [],
+        [OutageReconciliationStatus],
+        ['query'],
+      ),
+    'get_pending_commit' : IDL.Func([], [IDL.Vec(IDL.Nat8)], ['query']),
+    'get_point_entries' : IDL.Func(
+        [IDL.Nat64, IDL.Nat32],
+        [PointEntryPage],
+        ['query'],
+      ),
+    'get_point_ledger_len' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_points_config' : IDL.Func([], [PointsConfig], ['query']),
+    'get_points_recovery_coverage' : IDL.Func(
+        [],
+        [IDL.Opt(RecoveryCoverage)],
+        ['query'],
+      ),
+    'get_principal_outage_credit_entries' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat32],
+        [OutageCreditPage],
+        ['query'],
+      ),
+    'get_principal_point_entries' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat32],
+        [PointEntryPage],
+        ['query'],
+      ),
+    'get_principal_state' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Opt(PrincipalState)],
+        ['query'],
+      ),
+    'get_registration_info' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Opt(RegistrationInfo)],
+        ['query'],
+      ),
+    'get_revealed_seed' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(RevealedSeed)],
+        ['query'],
+      ),
+    'get_season1_final_supplement' : IDL.Func([], [Status], ['query']),
+    'get_season2_backfill_manifest_hash' : IDL.Func([], [Result_9], ['query']),
+    'get_season2_backfill_status' : IDL.Func(
+        [],
+        [IDL.Opt(Season2ImportStatus)],
+        ['query'],
+      ),
+    'get_season2_forward_status' : IDL.Func(
+        [],
+        [IDL.Opt(ForwardStatus)],
+        ['query'],
+      ),
+    'get_season2_import_manifest_hash' : IDL.Func(
+        [IDL.Vec(IDL.Nat64), IDL.Nat8],
+        [Result_9],
+        ['query'],
+      ),
+    'get_season2_import_status' : IDL.Func(
+        [],
+        [IDL.Opt(Season2ImportStatus)],
+        ['query'],
+      ),
+    'import_season2_backfill_batch' : IDL.Func(
+        [IDL.Nat32, IDL.Vec(Season2ImportRow)],
+        [Result_8],
+        [],
+      ),
+    'import_season2_batch' : IDL.Func(
+        [IDL.Nat32, IDL.Vec(Season2ImportRow)],
+        [Result_8],
+        [],
+      ),
+    'is_excluded' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
+    'is_registered' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
+    'register_test_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'remove_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
+    'set_asset_ledger' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
+    'set_epoch_driver_enabled' : IDL.Func([IDL.Bool], [Result_1], []),
+    'set_epoch_driver_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'set_excluded_principals' : IDL.Func(
+        [IDL.Vec(IDL.Principal)],
+        [Result_1],
+        [],
+      ),
+    'set_poll_enabled' : IDL.Func([IDL.Bool], [Result_1], []),
+    'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_5], []),
+    'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
+    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_5], []),
+    'trigger_poll' : IDL.Func([], [Result_10], []),
+  });
+};
+export const init = ({ IDL }) => {
+  const InitArgs = IDL.Record({
+    'admin' : IDL.Opt(IDL.Principal),
+    'excluded_principals' : IDL.Opt(IDL.Vec(IDL.Principal)),
+    'snapshot_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'season_start_ns' : IDL.Opt(IDL.Nat64),
+    'season_end_ns' : IDL.Opt(IDL.Nat64),
+  });
+  return [IDL.Opt(InitArgs)];
+};

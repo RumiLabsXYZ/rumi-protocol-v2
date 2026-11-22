@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentSeason, type CurrentSeason } from '$lib/services/currentSeasonService';
-  import { currentSeasonMessage } from '$lib/utils/currentSeason';
+  import { currentSeasonMessage, pendingCoverageMessage } from '$lib/utils/currentSeason';
 
   let data = $state<CurrentSeason | null>(null);
   let loading = $state(true);
@@ -31,6 +31,7 @@
     <strong>Season 2</strong>
     <p>{loading ? 'Checking current season…' : currentSeasonMessage(data, now)}</p>
     {#if data && !loading}<small>Checked {new Date(data.observedAt).toLocaleString()}.</small>{/if}
+    {#if !loading && pendingCoverageMessage(data)}<p>{pendingCoverageMessage(data)}</p>{/if}
     <small>Season 1 totals are shown separately in <a href="/points">points history</a>.</small>
   </div>
   <button type="button" onclick={() => load(true)} disabled={loading}>Check again</button>

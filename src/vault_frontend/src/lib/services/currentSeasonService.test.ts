@@ -9,6 +9,7 @@ import { getCurrentSeason } from './currentSeasonService';
 describe('Season 2 query isolation', () => {
   it('reads every current-season field from S2 and rejects a partial failure', async () => {
     const source = {
+      get_season2_forward_status: vi.fn().mockResolvedValue([]),
       get_epoch_status: vi.fn().mockResolvedValue({ driver_enabled: true }),
       get_points_config: vi.fn().mockResolvedValue({}),
       get_ingest_status: vi.fn().mockResolvedValue({ poll_enabled: true }),
@@ -25,5 +26,9 @@ describe('Season 2 query isolation', () => {
     expect(source.get_leaderboard).toHaveBeenCalledWith(0, 1);
     source.get_leaderboard.mockResolvedValue([{ total_points: 3n }]);
     expect((await getCurrentSeason(true)).highestPoints).toBe(3n);
+    source.get_season2_forward_status.mockRejectedValue(new Error('IC0536: no query method'));
+    expect((await getCurrentSeason(true)).forward).toBeNull();
+    source.get_season2_forward_status.mockRejectedValue(new Error('connection failed'));
+    await expect(getCurrentSeason(true)).rejects.toThrow('connection failed');
   });
 });

@@ -12,3 +12,7 @@ export function currentSeasonMessage(data: CurrentSeason | null, nowMs: number):
   if (now >= data.config.season_end_ns) return `Season 2 has ended. ${awards}`;
   return `Activity tracking configured; weekly awards pending. ${awards}`;
 }
+
+export function pendingCoverageMessage(data: CurrentSeason | null): string | null {
+  return data?.forward ? 'Earlier Season 2 activity remains pending reconciliation. Current totals do not settle that period.' : null;
+}

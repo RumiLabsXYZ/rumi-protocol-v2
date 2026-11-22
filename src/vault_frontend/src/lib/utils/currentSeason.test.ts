@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { currentSeasonMessage } from './currentSeason';
+import { currentSeasonMessage, pendingCoverageMessage } from './currentSeason';
 import type { CurrentSeason } from '../services/currentSeasonService';
 const data = {
   status: { driver_enabled: true, open_epoch: [{ epoch_end_ns: 2_000_000_000n }] },
   config: { season_start_ns: 0n, season_end_ns: 10_000_000_000n },
-  ingest: { poll_enabled: true }, highestPoints: 0n, observedAt: 0,
+  ingest: { poll_enabled: true }, highestPoints: 0n, forward: null, observedAt: 0,
 } as unknown as CurrentSeason;
 describe('current Season 2 messaging', () => {
   it('shows the stalled week despite enabled timers and zero awards', () => {
@@ -23,4 +23,11 @@ describe('current Season 2 messaging', () => {
     const paused = { ...data, status: { ...data.status, driver_enabled: false }, highestPoints: 2n };
     expect(currentSeasonMessage(paused, 1000)).toBe('Processing paused. Season 2 awards have been recorded.');
   });
+});
+
+it('keeps unresolved coverage visible even after future points are awarded', () => {
+  const future = { ...data, highestPoints: 100n, forward: { active_epoch: 1n } } as unknown as CurrentSeason;
+  expect(currentSeasonMessage(future, 1000)).toContain('awards have been recorded');
+  expect(pendingCoverageMessage(future)).toContain('do not settle that period');
+  expect(pendingCoverageMessage(data)).toBeNull();
 });
