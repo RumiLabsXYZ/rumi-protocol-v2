@@ -1,0 +1,117 @@
+{
+  "summary": "Discovery, composed XRP backend and deposit/recovery/repayment UI releases are verified. Nov21 pool upgrade blocks liquidation while depositor operations reopen; bot remains ICP-only. Fresh fee credit and customer settlement remain unverified. Vault51 settlement and exact reserve/recovery actions stay separate; carry the liquidation-only hold into future pool upgrades.",
+  "plainSummary": "The deposit and repayment fixes are live, and the pool now lets depositors use their funds while pool liquidations stay blocked. A fresh fee credit and the customer's repayment are still unconfirmed. Existing owners will check those outcomes; no new approval is requested by this board update.",
+  "glossary": [],
+  "priorities": {
+    "items": [
+      {
+        "id": "pool-liquidation-hold",
+        "title": "Pool access and liquidation-only hold",
+        "status": "ready",
+        "blockedReason": "",
+        "nextAction": "Existing pool owner: verify a natural post-reopen interest credit and preserve the liquidation-only hold in future upgrades. ICP bot remains enabled; manual fallback and CFX hold stay separate. Do not force a financial canary.",
+        "cardIds": [
+          "ROPS-15"
+        ]
+      },
+      {
+        "id": "vault51-settlement",
+        "title": "Vault 51 settlement follow-through",
+        "status": "blocked",
+        "blockedReason": "External payout, verified sweep and completed adoption are not established by reviewed receipts.",
+        "nextAction": "Existing case owner reconciles positive settlement evidence under the already approved exact scope; no installation reapproval or manual financial retry is created by this update.",
+        "cardIds": [
+          "ROPS-09"
+        ]
+      },
+      {
+        "id": "vault202-exact-scope",
+        "title": "Exact reserve and recovery decision",
+        "status": "blocked",
+        "blockedReason": "Prepared exact reserve/recovery actions remain separate from the newer ICP-only bot operating decision; no recovery execution receipt is established here.",
+        "nextAction": "Merritt retains the single exact action decision through the existing case. Preserve reserve/recovery holds and do not replay the prepared worker sequence.",
+        "cardIds": [
+          "ROPS-10"
+        ]
+      },
+      {
+        "id": "customer-frontend-delivery",
+        "title": "Deposit, recovery and repayment UI delivery",
+        "status": "done",
+        "blockedReason": "",
+        "nextAction": "Delivery is verified; Ellis/Merritt retain the existing customer case and compare the next observed attempt with expected consent. Uncertain settlement must be reconciled before retry; retain exact source fixes in future builds.",
+        "cardIds": [
+          "ROPS-13",
+          "ROPS-14"
+        ]
+      },
+      {
+        "id": "xrp-customer-integration",
+        "title": "XRP release delivery and preservation",
+        "status": "done",
+        "blockedReason": "",
+        "nextAction": "Preserve receipts, stopped-state evidence and exact reservation completion semantics. Historical deployment is verified; no new financial or liquidation authority follows from this card.",
+        "cardIds": [
+          "ROPS-07",
+          "ROPS-08",
+          "ROPS-12"
+        ]
+      },
+      {
+        "id": "release-closeout",
+        "title": "Release evidence and source closeout",
+        "status": "done",
+        "blockedReason": "",
+        "nextAction": "Retain approved PR dispositions and verified discovery; canonical source integration and later customer outcomes remain distinct. No new source or deployment campaign.",
+        "cardIds": [
+          "ROPS-01",
+          "ROPS-02",
+          "ROPS-05",
+          "ROPS-06",
+          "ROPS-11"
+        ]
+      },
+      {
+        "id": "sentinel-upkeep",
+        "title": "Cycle Sentinel and operational costs",
+        "status": "ready",
+        "blockedReason": "",
+        "nextAction": "Dorian: retain the lower-priority read-only policy/cost queue for its next authorized operations allocation. No funding, maintenance-now, proposal or controller action.",
+        "cardIds": [
+          "ROPS-03",
+          "ROPS-04"
+        ]
+      },
+      {
+        "id": "communications-parked",
+        "title": "Communications, X and introductory video",
+        "status": "paused",
+        "blockedReason": "Rob parked this work; Dorian retains custody of the existing drafts and workflow.",
+        "nextAction": "Resume only if Rob changes the parking decision.",
+        "cardIds": [
+          "COMMS-01"
+        ]
+      }
+    ]
+  },
+  "completions": {
+    "entries": [
+      {
+        "cardId": "ROPS-11",
+        "completedAt": "2026-11-16T03:49:39.302739Z"
+      },
+      {
+        "cardId": "ROPS-12",
+        "completedAt": "2026-11-18T20:17:51.974538Z"
+      },
+      {
+        "cardId": "ROPS-13",
+        "completedAt": "2026-11-19T03:47:45.469Z"
+      },
+      {
+        "cardId": "ROPS-14",
+        "completedAt": "2026-11-19T07:12:02.603Z"
+      }
+    ]
+  }
+}
