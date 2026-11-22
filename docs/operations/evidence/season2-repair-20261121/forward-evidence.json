@@ -1,0 +1,130 @@
+{
+  "client_date": "2026-11-21",
+  "assembled_at_utc": "2026-11-22T06:29:07Z",
+  "owner": "Orin",
+  "supersedes_containment_packet": "4dea81f3",
+  "network": "ic",
+  "source_commit": "2d0be167f492a349b1d1ccabe50624850abe527b",
+  "ui_commit": "9a846fa09b5f47f183ab5f9aa2cf7b9989a8ce59",
+  "ui_base": "8546e6a530eed99428ce4a4639676b602165bf61",
+  "scorer": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "operator_owner": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  "scorer_preflight": {
+    "module_hash": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
+    "cycles": 164401794274,
+    "memory_bytes": 138993348,
+    "idle_cycles_per_day": 4415007734,
+    "freeze_seconds": 2592000,
+    "epoch_index": 0,
+    "season_start_ns": 1794527100000000000,
+    "season_end_ns": 18446744073709551615,
+    "existing_snapshots": []
+  },
+  "source_tail_readback_utc": "2026-11-22T05:57:28Z",
+  "source_tails": {
+    "backend": 578508,
+    "threepool": 115,
+    "stability_pool": 2817,
+    "amm": 5
+  },
+  "source_cursors_before_repair": [
+    570731,
+    111,
+    2709,
+    5
+  ],
+  "rotating_oldest_ids": {
+    "stability_pool": 0,
+    "amm": 0
+  },
+  "funding": {
+    "ledger": "um5iw-rqaaa-aaaaq-qaaba-cai",
+    "source_subaccount": null,
+    "source_balance": 3400550044313,
+    "destination_execution_canister": "2cvsh-3aaaa-aaaaj-qspga-cai",
+    "execution_cycles": 1000000000000,
+    "fee": 100000000,
+    "ledger_debit": 1000100000000,
+    "source_balance_after_debit": 2400450044313,
+    "additional_user_transfer_needed": false
+  },
+  "artifacts": {
+    "wasm": {
+      "bytes": 3174071,
+      "sha256": "a5339b559e91a49428b82ef27219a0c5a9156c313dee4f33df75bde959b08bb4"
+    },
+    "gzip": {
+      "bytes": 793237,
+      "sha256": "7c2bccf91c018fc0ad5ce9cf7338a9c2c4974c36a5b0114dd5defbc46f07175f"
+    },
+    "ui_manifest": {
+      "files": 761,
+      "canonical_sha256": "9b45bbc916bf798c5a4b83cd8acceba3cc9b24ba51d2f3d85beae86fec05b0e7"
+    }
+  },
+  "activation_contract": {
+    "new_memory_id": 23,
+    "max_participants": 100,
+    "max_archive_bytes": 1048576,
+    "target_epoch": 1,
+    "actual_start": "T1 returned by successful activation; never backdated",
+    "epoch_end_ns": 1795736700000000000,
+    "latest_activation_exclusive_ns": 1795734300000000000,
+    "poll_seconds": 300,
+    "driver_seconds": 300,
+    "pending_coverage": [
+      "1794527100000000000",
+      "T1"
+    ],
+    "historical_prefix_separate": [
+      "1793491200000000000",
+      "1794527100000000000"
+    ],
+    "activation_awards": 0,
+    "missing_epoch_zero_summary": true,
+    "rates_and_eligibility_changed": false,
+    "missed_points_zeroed_or_forfeited": false
+  },
+  "tests": {
+    "retained_epoch_unit_evidence": 26,
+    "new_forward_window_test": "passed",
+    "new_poll_close_priority_test": "passed",
+    "binary_interface_tests": 2,
+    "final_opt_in_canonical_forward_e2e": {
+      "result": "passed",
+      "automatic_A_B_close_and_successor": true,
+      "expected_and_observed_synthetic_points": 499999999,
+      "successor_epoch": 2,
+      "backup_and_archive_upgrade_preservation": true,
+      "refuse_until_held_backlog_drained": true,
+      "no_epoch0_summary_or_activation_credit": true
+    },
+    "ui_tests": 7,
+    "frontend_build": "passed auth/domain and discovery checks",
+    "candid": "Rust extraction exact; old interface compatibility passed; generated S2 UI declarations match",
+    "reviews": "two focused reviewers PASS, including concrete poll-starvation fix and existing deferred repayment limitation",
+    "browser": "new UI against old live S2 query interface: method-absence compatibility and truthful overdue/no-awards status verified; prior mobile/global-bar checks retained"
+  },
+  "frontend_preflight": {
+    "canister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+    "module_hash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+    "cycles": 3483118879940,
+    "controllers": [
+      "cpbhu-5iaaa-aaaad-aalta-cai",
+      "e3mmv-5qaaa-aaaah-aadma-cai",
+      "m66jx-eiaaa-aaaap-quumq-cai",
+      "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+      "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+    ],
+    "existing_rumi_points_environment_id": "bfnu3-6aaaa-aaaab-qhanq-cai",
+    "environment_change_required": false
+  },
+  "limits": [
+    "Capture-time availability and final-tail margin are not guaranteed by the admission cutoff; expiry remains fail-closed.",
+    "Automatic full 5x repayment coverage remains deferred under DEMO-S2-002.",
+    "Backup ID is bound by source; management snapshot existence/download must be verified by operator."
+  ],
+  "live_deployments_or_funding_or_awards_performed": false,
+  "raw_participant_data_published": false,
+  "hosted_ci_or_merge_claimed": false
+}
