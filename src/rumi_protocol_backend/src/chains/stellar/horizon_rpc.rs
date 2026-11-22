@@ -1155,8 +1155,9 @@ mod tests {
             base64::engine::general_purpose::STANDARD.decode(decoded).unwrap(),
             envelope
         );
-        let with_slash = submit_transaction_request_at(&format!("{SUBMIT_BASE}/"), &envelope);
-        assert_eq!(with_slash.unwrap().url, request.url);
+        // Provider bases use canonical fixed paths: the shared validator
+        // rejects a trailing slash rather than normalizing an empty segment.
+        assert!(submit_transaction_request_at(&format!("{SUBMIT_BASE}/"), &envelope).is_none());
     }
 
     #[test]
