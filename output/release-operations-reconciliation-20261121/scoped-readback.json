@@ -1,0 +1,477 @@
+{
+  "listBoards": {
+    "data": {
+      "title": "Rumi · Release closeout & operations",
+      "cards": [
+        {
+          "id": "ROPS-01",
+          "title": "Close superseded PR bookkeeping",
+          "owner": "Dorian",
+          "blocked": false,
+          "description": "Scope: Close superseded PR bookkeeping\n\nEvidence / next action: Rob explicitly approved both closures. [PR605 evidence](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/605#issuecomment-6652564836) and [PR606 evidence](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/606#issuecomment-6652568933) posted. Both verified closed/unmerged; original remote branches/heads preserved. No build/CI, publication, deployment or financial action. Source and bookkeeping closeout complete.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/605#issuecomment-6652564836",
+              "title": "PR605 evidence"
+            },
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/606#issuecomment-6652568933",
+              "title": "PR606 evidence"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-02",
+          "title": "Source coverage and PR disposition for #605/#606",
+          "owner": "Dorian",
+          "blocked": false,
+          "description": "Scope: Source coverage and PR disposition for #605/#606\n\nEvidence / next action: Final comparison at0dea74a1: PR605 files exact; all PR606 accepted behavior retained, including pool delta via PR623. Remaining differences are subsequent backend/nICP work and formatting, not missing Sunset scope. PR605/606 are source-superseded and now closed under explicit approval; historical deployment receipts remain distinct. No new source task.",
+          "state": "Done",
+          "evidence": []
+        },
+        {
+          "id": "ROPS-05",
+          "title": "Preserve #605 in paired frontend composition",
+          "owner": "Existing frontend release owner; Dorian reconciliation",
+          "blocked": false,
+          "description": "Scope: Preserve #605 in paired frontend composition\n\nEvidence / next action: [Planba1ef31b](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/ba1ef31b4d2bf3faeca96213a00232aa7b526708/docs/operations/cksol-frontend-publication-plan-20261104.md) records all2667livekeys/properties and auth preservation. Both balance component/spec byte-match45af74a4 in pairedsource6847982b and currentmain0dea74a1. Source/artifact preservation scope is complete. The separately approved paired frontend was published on November 11; [later live receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/c4b3934fa3e727768aa9eaf80ae0e5f94a35aa59/docs/operations/oisy-cksol-frontend-publication-result-20261111.md). No new build or cherry-pick is queued, and publication does not prove customer consent.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/ba1ef31b4d2bf3faeca96213a00232aa7b526708/docs/operations/cksol-frontend-publication-plan-20261104.md",
+              "title": "Planba1ef31b"
+            },
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/c4b3934fa3e727768aa9eaf80ae0e5f94a35aa59/docs/operations/oisy-cksol-frontend-publication-result-20261111.md",
+              "title": "later live receipt"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-06",
+          "title": "Integrate missing #606 pool admission checks",
+          "owner": "Dorian; original sunset/pool implementer",
+          "blocked": false,
+          "description": "Scope: Integrate missing #606 pool admission checks\n\nEvidence / next action: [PR623](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623) merged as34cd6769048f88a224dd78fa8fa59b3230768cee at2026-11-05T04:19:09Z. Approvedheadf660f751 unchanged; [requiredCI41965537346](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41965537346) passed. All3 current-source focused tests passed; ownedgroups closed. Source integration complete only; no deployment or liquidation. ROPS05 remains separate.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623",
+              "title": "PR623"
+            },
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41965537346",
+              "title": "requiredCI41965537346"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-07",
+          "title": "SEC10 XRP customer source integration",
+          "owner": "Dorian integration; Ellis case; Miles source; Bram canonical publisher",
+          "blocked": false,
+          "description": "Scope: SEC10 XRP customer source integration\n\nEvidence / next action: [PR628](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/628) merged as5edd1ff1 at2026-11-06T09:31:28Z, head1d019794. [RequiredCI42193041195](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/42193041195) passed20m6s; merged3Rustblobs match acceptedc02c4bff,6tests/bincheck reused. Interest/rounding clarified. CanonicalSEC10 publisher remains Bram; handoff retained, this card is integration-only. Source integration complete. Historical SEC11 deployment is complete in ROPS08; subsequent releases are recorded in ROPS12-14. Source integration does not establish customer settlement or release any separate financial hold.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/628",
+              "title": "PR628"
+            },
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/42193041195",
+              "title": "RequiredCI42193041195"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-08",
+          "title": "Deploy XRP withdrawal and repeat-deposit repair",
+          "owner": "Dorian release; Miles source; Ellis case",
+          "blocked": false,
+          "description": "Scope: Deploy XRP withdrawal and repeat-deposit repair\n\nEvidence / next action: Historical November 7 delivery; later deployed versions are recorded in ROPS12-15. Both fixes deployed: backend controllerRunning exactuploadb81583ae, source0eff84c9; frontendversion1794099947058 served. All14focused+1canonical checks and production/backend/frontendauth builds passed; 7frontend source tests reused. Stopped drain/freshbackup18/9other snapshots preserved; all11 scopedreads+fixedconfig match. Full3384keys/3578encodings verified; all3078oldkeys/properties retained,306newkeys+7approvedmutablecontents;308stage+9activation+5primary servedchecks pass. Frontmodule/settings/auth unchanged. [Terminal evidence](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db9/docs/operations/sec11-live-release-20261107.md). Release acceptance complete; actualcustomerretry/message remains Ellis-owned and held. FuturebackendmustretainSEC11receiptmaps/privatejournal; olderwriterrollback prohibited. No financial/customer action.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db9/docs/operations/sec11-live-release-20261107.md",
+              "title": "Terminal evidence"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-09",
+          "title": "Track corrected Vault 51 adoption release",
+          "owner": "Dorian release; Adrian source",
+          "blocked": false,
+          "description": "Scope: Track corrected Vault 51 adoption release\n\nEvidence / next action: The separately approved correction is installed and its automatic check verified. [Corrective live receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/c4b3934fa3e727768aa9eaf80ae0e5f94a35aa59/docs/operations/vault51-corrective-live-release-20261111.md). Later retained claim evidence does not establish payout, verified sweep or completed adoption. Next: reconcile positive settlement evidence through the existing case; do not re-ask the completed installation approval or infer settlement from timer delivery.",
+          "state": "Review",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/c4b3934fa3e727768aa9eaf80ae0e5f94a35aa59/docs/operations/vault51-corrective-live-release-20261111.md",
+              "title": "Corrective live receipt"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-03",
+          "title": "Reconcile stale Cycle Sentinel operation cards",
+          "owner": "Dorian",
+          "blocked": false,
+          "description": "Scope: Reconcile stale Cycle Sentinel operation cards\n\nEvidence / next action: Existing CS-66/CS-68 records leave signer-screen proof and proposal 17 activation unresolved; [#416](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/416) is open/unmerged and source-only. Acceptance: timestamped read-only current policy/proposal/status evidence, with stale versus current facts separated and old card owners preserved. Next: one bounded read-only inspection at the next operations allocation. No maintenance-now, proposal execution, activation, funding or controller changes.",
+          "state": "Ready",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/416",
+              "title": "#416"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-04",
+          "title": "Produce a small operational-cost baseline",
+          "owner": "Dorian",
+          "blocked": false,
+          "description": "Scope: Produce a small operational-cost baseline\n\nEvidence / next action: Acceptance: observation date, available cycle-burn/runway coverage, gaps and concrete cost drivers; no fabricated zeroes or savings claims. Next: reuse current Sentinel telemetry and available existing billing evidence, label unavailable inputs, and recommend only evidence-supported upkeep. Lower priority than release closeout and the portfolio's recovery work.",
+          "state": "Ready",
+          "evidence": []
+        },
+        {
+          "id": "COMMS-01",
+          "title": "Preserve communications, X workflow and introductory video",
+          "owner": "Dorian",
+          "blocked": false,
+          "description": "Scope: Preserve communications, X workflow and introductory video\n\nEvidence / next action: Rob parked portfolio item #11. Acceptance: retain existing drafts and workflow history without drafting, publishing, scheduling or restarting workers. Next: resume only if Rob changes the parking decision. Blocker owner: Rob; this is deliberate parking, not a technical failure.",
+          "state": "Paused",
+          "evidence": []
+        },
+        {
+          "id": "ROPS-10",
+          "title": "Preserve exact reserve and recovery approval scope",
+          "owner": "Adrian source; Dorian release; Merritt decision",
+          "blocked": false,
+          "description": "Scope: Preserve exact reserve and recovery approval scope\n\nEvidence / next action: [Exact prepared packet](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/7d0d9b69ab11d1d0bbbbfdfe315cc02d64452396/docs/operations/vault202-remedy-20261114.md) records tested source, built artifact and bounded reserve/recovery steps. Preparation is complete; exact recovery, reserve activation and settlement are not established by reviewed execution receipts. Preserve those separate holds. The current ICP-only bot setting comes from the newer November 21 decision, not execution of this old packet. Next: Merritt resolves the remaining exact action decision through the existing case; no new build or financial retry from board upkeep.",
+          "state": "Review",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/7d0d9b69ab11d1d0bbbbfdfe315cc02d64452396/docs/operations/vault202-remedy-20261114.md",
+              "title": "Exact prepared packet"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-11",
+          "title": "Publish ICP connector discovery",
+          "owner": "Dorian publisher; Ellis composition",
+          "blocked": false,
+          "description": "Scope: Publish ICP connector discovery\n\nEvidence / next action: [November 15 live result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8a5886b59bac5e5a40b04a2939a4de4bd485c149/docs/operations/icp-discovery-live-result-20261115.md) verifies the two discovery assets and actual connector discovery/query calls under accepted operator terms. Historical assets, authentication and permissions preserved. Keep discovery generation in future frontend compositions; authenticated identity equivalence and financial actions were not demonstrated.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8a5886b59bac5e5a40b04a2939a4de4bd485c149/docs/operations/icp-discovery-live-result-20261115.md",
+              "title": "November 15 live result"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-12",
+          "title": "Deploy composed XRP sizing and retry-bound repair",
+          "owner": "Dorian release; Adrian sizing/accounting",
+          "blocked": false,
+          "description": "Scope: Deploy composed XRP sizing and retry-bound repair\n\nEvidence / next action: [November 18 deployed result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b667e53a17a965865214784fead4396e97b2e3d7/docs/operations/xrp-composed-partial-live-result-20261118.md) verifies exact backend bytes, preserved stopped state and snapshot retention. Existing 154 checks and source-matched build passed. New admissions use the recovery cap and expiry guard while exact burned reservations retain completion. No operator financial canary or compensation. Current pool policy is the newer liquidation-only hold in ROPS-15, not authority to execute the older broad-resumption proposal.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b667e53a17a965865214784fead4396e97b2e3d7/docs/operations/xrp-composed-partial-live-result-20261118.md",
+              "title": "November 18 deployed result"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-13",
+          "title": "Publish recovery UI and OISY deposit repair",
+          "owner": "Dorian publisher; Ellis verification; Merritt case",
+          "blocked": false,
+          "description": "Scope: Publish recovery UI and OISY deposit repair\n\nEvidence / next action: [Live operator receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md) verifies publication, complete stored/served readbacks and public desktop/mobile UI. Exact source includes recovery menu/queue restoration and both deposit click paths. Earlier rejected staging and stale baseline packets remain historical; they are not unresolved approval requests for this completed release. Actual customer deposit and authenticated recovery outcomes remain separate. Future frontend sources must retain these delivered fixes.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md",
+              "title": "Live operator receipt"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-14",
+          "title": "Publish action-owned OISY repayment signer",
+          "owner": "Dorian publisher; Ellis verification; Merritt case",
+          "blocked": false,
+          "description": "Scope: Publish action-owned OISY repayment signer\n\nEvidence / next action: [Approved-packet live result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/de583984e2e37aa58bdee9633c3bf36b221d7a6b/docs/operations/vault197-oisy-repayment-live-result-20261118.md) verifies actual asset calls, independent byte proofs and desktop/mobile loading. All 44 focused tests, source reviews and one build passed; prior deposit/recovery fixes composed. The client was retry-ready. Customer consent and debt reduction remain unverified in the existing case. Next: case owner compares the next observed attempt with expected consent; reconcile unknown transactions before retry. Canonical source integration remains separate from deployed proof.",
+          "state": "Done",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/de583984e2e37aa58bdee9633c3bf36b221d7a6b/docs/operations/vault197-oisy-repayment-live-result-20261118.md",
+              "title": "Approved-packet live result"
+            }
+          ]
+        },
+        {
+          "id": "ROPS-15",
+          "title": "Maintain liquidation-only hold and verify fee credit",
+          "owner": "Existing pool release owner; Dorian reconciliation; Merritt oversight",
+          "blocked": false,
+          "description": "Scope: Maintain liquidation-only hold and verify fee credit\n\nEvidence / next action: November 21 owner release verifies installed pool module 23c3a492, reopened deposits/withdrawals/standard claims and refusal of pool liquidation capacity. The bot is enabled for ICP only; eligible remainder is available to manual liquidation. CFX retains its separate backend claim hold. [Current evidence reconciliation](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/release-board-reconciliation-20261121/docs/coordination/release-operations-board.md#november-21-release-evidence-reconciliation). Fee-sharing configuration and allocation test passed, but a fresh post-reopen depositor credit is unverified. Next: existing owner verifies a natural credit without forcing financial work. Carry this release hold into future pool upgrades; the old broad-resumption proposal is superseded.",
+          "state": "Review",
+          "evidence": [
+            {
+              "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/release-board-reconciliation-20261121/docs/coordination/release-operations-board.md#november-21-release-evidence-reconciliation",
+              "title": "Current evidence reconciliation"
+            }
+          ]
+        }
+      ],
+      "lead": "Dorian",
+      "sourceUpdatedAt": "1795327633579374284",
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "projectId": "rumi-release-operations",
+      "columns": [
+        "Backlog",
+        "Ready",
+        "In progress",
+        "Review",
+        "Done",
+        "Blocked",
+        "Paused"
+      ]
+    },
+    "publishedAt": "1795327715982576820",
+    "publishedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae",
+    "revision": "19"
+  },
+  "listPresentations": {
+    "data": {
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "glossary": [],
+      "summary": "Discovery, composed XRP backend and deposit/recovery/repayment UI releases are verified. Nov21 pool upgrade blocks liquidation while depositor operations reopen; bot remains ICP-only. Fresh fee credit and customer settlement remain unverified. Vault51 settlement and exact reserve/recovery actions stay separate; carry the liquidation-only hold into future pool upgrades."
+    },
+    "publishedAt": "1795327729564797987",
+    "publishedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae",
+    "projectId": "rumi-release-operations"
+  },
+  "listPlainSummaries": {
+    "data": {
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "summary": "The deposit and repayment fixes are live, and the pool now lets depositors use their funds while pool liquidations stay blocked. A fresh fee credit and the customer's repayment are still unconfirmed. Existing owners will check those outcomes; no new approval is requested by this board update."
+    },
+    "publishedAt": "1795327734277641005",
+    "publishedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae",
+    "projectId": "rumi-release-operations"
+  },
+  "listPriorities": {
+    "data": {
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "items": [
+        {
+          "id": "pool-liquidation-hold",
+          "status": "ready",
+          "title": "Pool access and liquidation-only hold",
+          "cardIds": [
+            "ROPS-15"
+          ],
+          "nextAction": "Existing pool owner: verify a natural post-reopen interest credit and preserve the liquidation-only hold in future upgrades. ICP bot remains enabled; manual fallback and CFX hold stay separate. Do not force a financial canary.",
+          "blockedReason": ""
+        },
+        {
+          "id": "vault51-settlement",
+          "status": "blocked",
+          "title": "Vault 51 settlement follow-through",
+          "cardIds": [
+            "ROPS-09"
+          ],
+          "nextAction": "Existing case owner reconciles positive settlement evidence under the already approved exact scope; no installation reapproval or manual financial retry is created by this update.",
+          "blockedReason": "External payout, verified sweep and completed adoption are not established by reviewed receipts."
+        },
+        {
+          "id": "vault202-exact-scope",
+          "status": "blocked",
+          "title": "Exact reserve and recovery decision",
+          "cardIds": [
+            "ROPS-10"
+          ],
+          "nextAction": "Merritt retains the single exact action decision through the existing case. Preserve reserve/recovery holds and do not replay the prepared worker sequence.",
+          "blockedReason": "Prepared exact reserve/recovery actions remain separate from the newer ICP-only bot operating decision; no recovery execution receipt is established here."
+        },
+        {
+          "id": "customer-frontend-delivery",
+          "status": "done",
+          "title": "Deposit, recovery and repayment UI delivery",
+          "cardIds": [
+            "ROPS-13",
+            "ROPS-14"
+          ],
+          "nextAction": "Delivery is verified; Ellis/Merritt retain the existing customer case and compare the next observed attempt with expected consent. Uncertain settlement must be reconciled before retry; retain exact source fixes in future builds.",
+          "blockedReason": ""
+        },
+        {
+          "id": "xrp-customer-integration",
+          "status": "done",
+          "title": "XRP release delivery and preservation",
+          "cardIds": [
+            "ROPS-07",
+            "ROPS-08",
+            "ROPS-12"
+          ],
+          "nextAction": "Preserve receipts, stopped-state evidence and exact reservation completion semantics. Historical deployment is verified; no new financial or liquidation authority follows from this card.",
+          "blockedReason": ""
+        },
+        {
+          "id": "release-closeout",
+          "status": "done",
+          "title": "Release evidence and source closeout",
+          "cardIds": [
+            "ROPS-01",
+            "ROPS-02",
+            "ROPS-05",
+            "ROPS-06",
+            "ROPS-11"
+          ],
+          "nextAction": "Retain approved PR dispositions and verified discovery; canonical source integration and later customer outcomes remain distinct. No new source or deployment campaign.",
+          "blockedReason": ""
+        },
+        {
+          "id": "sentinel-upkeep",
+          "status": "ready",
+          "title": "Cycle Sentinel and operational costs",
+          "cardIds": [
+            "ROPS-03",
+            "ROPS-04"
+          ],
+          "nextAction": "Dorian: retain the lower-priority read-only policy/cost queue for its next authorized operations allocation. No funding, maintenance-now, proposal or controller action.",
+          "blockedReason": ""
+        },
+        {
+          "id": "communications-parked",
+          "status": "paused",
+          "title": "Communications, X and introductory video",
+          "cardIds": [
+            "COMMS-01"
+          ],
+          "nextAction": "Resume only if Rob changes the parking decision.",
+          "blockedReason": "Rob parked this work; Dorian retains custody of the existing drafts and workflow."
+        }
+      ]
+    },
+    "publishedAt": "1795327739296942502",
+    "publishedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae",
+    "projectId": "rumi-release-operations"
+  },
+  "listProjectInfo": {
+    "data": {
+      "repository": "RumiLabsXYZ/rumi-protocol-v2"
+    },
+    "publishedAt": "1793820289599410338",
+    "publishedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae",
+    "projectId": "rumi-release-operations"
+  },
+  "listCompletionMetadata": [
+    {
+      "completedAt": "1794800979302739000",
+      "active": true,
+      "card": {
+        "id": "ROPS-11",
+        "title": "Publish ICP connector discovery",
+        "owner": "Dorian publisher; Ellis composition",
+        "blocked": false,
+        "description": "Scope: Publish ICP connector discovery\n\nEvidence / next action: [November 15 live result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8a5886b59bac5e5a40b04a2939a4de4bd485c149/docs/operations/icp-discovery-live-result-20261115.md) verifies the two discovery assets and actual connector discovery/query calls under accepted operator terms. Historical assets, authentication and permissions preserved. Keep discovery generation in future frontend compositions; authenticated identity equivalence and financial actions were not demonstrated.",
+        "state": "Done",
+        "evidence": [
+          {
+            "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8a5886b59bac5e5a40b04a2939a4de4bd485c149/docs/operations/icp-discovery-live-result-20261115.md",
+            "title": "November 15 live result"
+          }
+        ]
+      },
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "projectId": "rumi-release-operations",
+      "manual": false,
+      "cardId": "ROPS-11",
+      "restored": false,
+      "archivedAt": "0",
+      "archivedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae"
+    },
+    {
+      "completedAt": "1795033071974538000",
+      "active": true,
+      "card": {
+        "id": "ROPS-12",
+        "title": "Deploy composed XRP sizing and retry-bound repair",
+        "owner": "Dorian release; Adrian sizing/accounting",
+        "blocked": false,
+        "description": "Scope: Deploy composed XRP sizing and retry-bound repair\n\nEvidence / next action: [November 18 deployed result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b667e53a17a965865214784fead4396e97b2e3d7/docs/operations/xrp-composed-partial-live-result-20261118.md) verifies exact backend bytes, preserved stopped state and snapshot retention. Existing 154 checks and source-matched build passed. New admissions use the recovery cap and expiry guard while exact burned reservations retain completion. No operator financial canary or compensation. Current pool policy is the newer liquidation-only hold in ROPS-15, not authority to execute the older broad-resumption proposal.",
+        "state": "Done",
+        "evidence": [
+          {
+            "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b667e53a17a965865214784fead4396e97b2e3d7/docs/operations/xrp-composed-partial-live-result-20261118.md",
+            "title": "November 18 deployed result"
+          }
+        ]
+      },
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "projectId": "rumi-release-operations",
+      "manual": false,
+      "cardId": "ROPS-12",
+      "restored": false,
+      "archivedAt": "0",
+      "archivedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae"
+    },
+    {
+      "completedAt": "1795060065469000000",
+      "active": true,
+      "card": {
+        "id": "ROPS-13",
+        "title": "Publish recovery UI and OISY deposit repair",
+        "owner": "Dorian publisher; Ellis verification; Merritt case",
+        "blocked": false,
+        "description": "Scope: Publish recovery UI and OISY deposit repair\n\nEvidence / next action: [Live operator receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md) verifies publication, complete stored/served readbacks and public desktop/mobile UI. Exact source includes recovery menu/queue restoration and both deposit click paths. Earlier rejected staging and stale baseline packets remain historical; they are not unresolved approval requests for this completed release. Actual customer deposit and authenticated recovery outcomes remain separate. Future frontend sources must retain these delivered fixes.",
+        "state": "Done",
+        "evidence": [
+          {
+            "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md",
+            "title": "Live operator receipt"
+          }
+        ]
+      },
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "projectId": "rumi-release-operations",
+      "manual": false,
+      "cardId": "ROPS-13",
+      "restored": false,
+      "archivedAt": "0",
+      "archivedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae"
+    },
+    {
+      "completedAt": "1795072322603000000",
+      "active": true,
+      "card": {
+        "id": "ROPS-14",
+        "title": "Publish action-owned OISY repayment signer",
+        "owner": "Dorian publisher; Ellis verification; Merritt case",
+        "blocked": false,
+        "description": "Scope: Publish action-owned OISY repayment signer\n\nEvidence / next action: [Approved-packet live result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/de583984e2e37aa58bdee9633c3bf36b221d7a6b/docs/operations/vault197-oisy-repayment-live-result-20261118.md) verifies actual asset calls, independent byte proofs and desktop/mobile loading. All 44 focused tests, source reviews and one build passed; prior deposit/recovery fixes composed. The client was retry-ready. Customer consent and debt reduction remain unverified in the existing case. Next: case owner compares the next observed attempt with expected consent; reconcile unknown transactions before retry. Canonical source integration remains separate from deployed proof.",
+        "state": "Done",
+        "evidence": [
+          {
+            "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/de583984e2e37aa58bdee9633c3bf36b221d7a6b/docs/operations/vault197-oisy-repayment-live-result-20261118.md",
+            "title": "Approved-packet live result"
+          }
+        ]
+      },
+      "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+      "projectId": "rumi-release-operations",
+      "manual": false,
+      "cardId": "ROPS-14",
+      "restored": false,
+      "archivedAt": "0",
+      "archivedBy": "lcmwi-rsey6-56aan-7ytvg-eql46-mw46q-hlo2d-njans-tk3f3-ad5uh-hae"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "classification": "stale-corrected",
+  "oldRevision": "18",
+  "newRevision": "19",
+  "checks": {
+    "board": true,
+    "revision": true,
+    "presentation": true,
+    "plain": true,
+    "priorities": true,
+    "repository": true,
+    "completions": true,
+    "completionSource": true
+  },
+  "cards": 16,
+  "priorityItems": 8,
+  "actualCompletionDates": 4,
+  "sourceRevision": "5ceadd577a6720b08bfc517006c5f5b183b5281ffdf1736b2888f85c215bb7b4",
+  "originalCardsAndStatesPreserved": true,
+  "communications": "unchanged-paused",
+  "reserveRecovery": "held",
+  "poolLiquidations": "held; ordinary depositor operations reopened",
+  "customerSettlementAndFreshFeeCredit": "unverified",
+  "accessGrantsOrProductWrites": false,
+  "noOpReadbackVerified": true,
+  "sourcePath": "docs/coordination/release-operations-board.md",
+  "metadataSourcePath": "docs/coordination/release-operations-lookout-metadata.json",
+  "existingEntryPoint": "output/release-operations-20261104/prepare.mjs",
+  "worktrees": {
+    "registered": 66,
+    "freePercent": 9,
+    "eligible": 0,
+    "removed": 0,
+    "blockedOrProtected": 65
+  }
+}
