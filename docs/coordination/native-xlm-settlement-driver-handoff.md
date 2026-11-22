@@ -28,4 +28,8 @@ Written 2026-11-14 at `cfeebf55` (source unchanged since `843e4e1c`). Docs only.
 
 ## Status
 
-Validation of the transport source (`843e4e1c`, runner `67e9d11c`) remains waiting for shared-machine capacity and an existing coordination question. This note does not change that status or the Lookout board.
+Validation of the transport source (`843e4e1c`, runner `67e9d11c`) remains unallocated while an existing coordination question is pending. Sufficient disk or an idle resource slot does not grant an allocation. No compiler or live action has run for this transport source.
+
+## Material-update closeout
+
+Before closing a material implementation or evidence handoff, reconcile the existing Lookout cards, next actions and priorities with the accepted source and receipts; update both technical `summary` and 2–3 sentence `plainSummary`. Use `native-xlm-lookout-manifest.json` and the existing scoped publisher for dry-run, publish and a second dry-run. Record the old/new revision and require board, presentation, Plain English, priorities and repository association to read back unchanged. Follow `native-xlm-lookout-publishing.md`; if evidence is unchanged, do not publish or change completion dates. Preserve actual denials and all live-action holds. Publication is status housekeeping, not proof of deployment or customer impact.

@@ -45,7 +45,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Pending-row and attribution insertion is locally tested. Keep it dormant until public confirm APIs and the atomic credit flow are implemented; keep XLM Frozen.",
+      "nextAction": "Preserve the locally proven test-only lifecycle and unchanged production guards. Integrate remaining settlement and admission requirements before any production registration; keep XLM Frozen.",
       "cardIds": [
         "WP2"
       ]
@@ -54,7 +54,7 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "The Horizon submission source is written but its focused check has not run: it is waiting for a shared build slot and fresh allocation, and an existing coordination question about this work is still open. Startup disk headroom is currently sufficient.",
+      "blockedReason": "Horizon transport source is written but its focused check remains unallocated while the existing coordination question is pending. Disk headroom is sufficient; available capacity alone is not an allocation.",
       "nextAction": "When a shared slot and the coordination answer are available, run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) under a fresh allocation. Source stays frozen.",
       "cardIds": [
         "WP3"
@@ -64,8 +64,8 @@
       "id": "claims-exits-liquidation",
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
-      "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Compile/test the claim recorder's fee, destination, and key/network guards when the shared heavy slot is available; then integrate and validate XLM claim settlement/reconciliation, keeping WP4 blocked until payout lifecycle evidence exists.",
+      "blockedReason": "Local withdrawal-to-claim and settlement-helper checks passed, but the integrated XLM settlement driver and real provider/signature binding remain incomplete. No live payout is proved; production XLM stays Frozen.",
+      "nextAction": "Validate the unbuilt Horizon transport under the prepared runner after the existing coordination answer and a fresh shared allocation; then implement the driver using native-xlm-settlement-driver-handoff.md and its mocked acceptance cases.",
       "cardIds": [
         "WP4"
       ]
@@ -85,7 +85,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo validation after 8dd604c7 when the shared slot is available; verify fixed-slot classification/wrapper plus reserve quorum and freshness, resolve provider independence, then complete endpoint wiring, settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
+      "nextAction": "Next validation is the prepared 22-test Horizon transport batch plus production compile check for 843e4e1c (runner 67e9d11c), awaiting the existing coordination answer and fresh allocation. Preserve earlier local passes; then complete driver wiring and mocked integration before assessing live testnet readiness.",
       "cardIds": [
         "WP6"
       ]
