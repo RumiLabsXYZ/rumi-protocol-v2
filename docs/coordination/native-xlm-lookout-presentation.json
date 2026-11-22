@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Local mocked lifecycle and settlement-helper proof includes the 27-test decision batch (receipt a65c3d4b). Rob answered the existing Cody–Mara messaging question: coordination is approved and Cody was notified. Horizon transport 843e4e1c remains unbuilt pending a fresh source-bound allocation for runner 67e9d11c. The integrated payout driver is missing; no real signing, submission, testnet install or activation is proved.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests cover deposits, borrowing, repayment and recording withdrawals, but paying withdrawals still needs more work. Rob has approved the coordination messages; Cody can now arrange the next code check, with no further decision needed from Rob for that step.",
+  "summary": "XLM remains Frozen; production guards unchanged. Allocated Horizon transport check of 843e4e1c ran once: 21 passed, 1 failed (test expected a trailing-slash base that the shared validator rejects); production check did not run. Test-only correction bdb54802 is pushed, not retested. Owned process group is independently closed; receipt f8f12c71. Cody–Mara coordination is approved. A fresh source-bound validation is needed; no live signing, submission, testnet install or activation is proved.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. The next code check found a test expectation that disagreed with the existing address rules; that test is corrected but has not run again. Coordination is approved, and the next step is arranging a fresh check; no new decision is requested here.",
   "glossary": [
     {
       "term": "Stellar",

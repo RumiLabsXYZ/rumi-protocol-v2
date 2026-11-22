@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "Horizon transport source is written but its focused check remains unallocated. Rob approved Cody–Mara coordination messages; Cody has been notified to check current capacity and issue a fresh source-bound allocation.",
-      "nextAction": "After Cody issues a fresh capacity-checked allocation, run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c). Do not reuse any prior allocation; source stays frozen.",
+      "blockedReason": "One allocated Horizon transport check stopped at 21 passed, 1 failed; production check did not run. The trailing-slash test expectation is corrected at bdb54802, not retested.",
+      "nextAction": "Have Cody review corrected source and the permitted validation packet scope, then obtain a fresh source-bound allocation. Preserve consumed allocation4b85c8c0 and its failure; do not replay the old runner/grant.",
       "cardIds": [
         "WP3"
       ]
@@ -65,7 +65,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "Local withdrawal-to-claim and settlement-helper checks passed, but the integrated XLM settlement driver and real provider/signature binding remain incomplete. No live payout is proved; production XLM stays Frozen.",
-      "nextAction": "Validate the unbuilt Horizon transport under the prepared runner after a fresh shared allocation; then implement the driver using native-xlm-settlement-driver-handoff.md and its mocked acceptance cases. Cody–Mara coordination is now approved.",
+      "nextAction": "Validate the pushed test-only correction bdb54802 under a fresh reviewed source-bound packet and allocation; old batch stopped at 21 passed/1 failed and production check was skipped. Then continue the existing driver handoff. No automatic retry or live action.",
       "cardIds": [
         "WP4"
       ]
@@ -85,7 +85,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Next validation is the prepared 22-test Horizon transport batch plus production compile check for 843e4e1c (runner 67e9d11c), awaiting fresh allocation. Rob approved Cody–Mara coordination. Preserve earlier local passes; then complete driver wiring and mocked integration before assessing live testnet readiness.",
+      "nextAction": "Validate the pushed test-only correction bdb54802 under a fresh reviewed source-bound packet and allocation; old batch stopped at 21 passed/1 failed and production check was skipped. Then continue the existing driver handoff. No automatic retry or live action.",
       "cardIds": [
         "WP6"
       ]

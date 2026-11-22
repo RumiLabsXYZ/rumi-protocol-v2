@@ -48,3 +48,7 @@ Each needs its own focused local validation before any testnet step.
 ## Readiness signal
 
 Testnet is ready to propose when items 1–5 above have passed focused local validation. That point has not been reached.
+
+## Latest transport check
+
+The original runner `67e9d11c` ran once under allocation `4b85c8c0-e93e-4ffb-b744-ec8bf1554110` on implementation `843e4e1c`, docs-only runtime HEAD `4bb7c2a2`: **21 passed, 1 failed**, native test exit 101. The production check did not run. The sole failure expected trailing-slash provider-base acceptance, contrary to the existing shared validator. Test-only correction `bdb54802` preserves that validator and now asserts rejection. It is pushed, not retested. All owned processes are independently closed; no allocation replay. See `native-xlm-horizon-test-receipt-2026-11-21.md`. Older “not run” transport entries above are historical and superseded by this result; no live proof is established.
