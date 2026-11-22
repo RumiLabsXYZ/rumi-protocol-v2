@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "One allocated Horizon transport check stopped at 21 passed, 1 failed; production check did not run. The trailing-slash test expectation is corrected at bdb54802, not retested.",
-      "nextAction": "Have Cody review corrected source and the permitted validation packet scope, then obtain a fresh source-bound allocation. Preserve consumed allocation4b85c8c0 and its failure; do not replay the old runner/grant.",
+      "blockedReason": "The test-only local lifecycle and Horizon transport checks pass, but integrated claim payout, current live oracle/provider evidence and production admission remain incomplete.",
+      "nextAction": "Continue the existing settlement-driver implementation and mocked acceptance cases; preserve the new 22-test/production-check PASS and the prior failed attempt separately. A further compiler batch requires fresh allocation.",
       "cardIds": [
         "WP3"
       ]
@@ -65,7 +65,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "Local withdrawal-to-claim and settlement-helper checks passed, but the integrated XLM settlement driver and real provider/signature binding remain incomplete. No live payout is proved; production XLM stays Frozen.",
-      "nextAction": "Validate the pushed test-only correction bdb54802 under a fresh reviewed source-bound packet and allocation; old batch stopped at 21 passed/1 failed and production check was skipped. Then continue the existing driver handoff. No automatic retry or live action.",
+      "nextAction": "Implement the integrated settlement driver against native-xlm-settlement-driver-handoff.md: two guards, post-read freshness, signature snapshot binding, prepared resume and reconcile-before-replacement. Transport validation now passes; live invocation remains held.",
       "cardIds": [
         "WP4"
       ]
@@ -85,7 +85,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Validate the pushed test-only correction bdb54802 under a fresh reviewed source-bound packet and allocation; old batch stopped at 21 passed/1 failed and production check was skipped. Then continue the existing driver handoff. No automatic retry or live action.",
+      "nextAction": "Preserve the 22-test Horizon transport plus feature-off compile PASS. Next validate the integrated driver with mocked lifecycle acceptance cases under a fresh allocation; live testnet readiness remains unproved.",
       "cardIds": [
         "WP6"
       ]
