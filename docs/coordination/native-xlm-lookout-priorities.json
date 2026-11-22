@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "The test-only local lifecycle and Horizon transport checks pass, but integrated claim payout, current live oracle/provider evidence and production admission remain incomplete.",
-      "nextAction": "Continue the existing settlement-driver implementation and mocked acceptance cases; preserve the new 22-test/production-check PASS and the prior failed attempt separately. A further compiler batch requires fresh allocation.",
+      "nextAction": "Preserve the accepted local lifecycle and transport PASS. Continue the existing settlement-driver source once current included capacity is verified for its original executor; do not infer spending or new-session authority.",
       "cardIds": [
         "WP3"
       ]
@@ -64,8 +64,8 @@
       "id": "claims-exits-liquidation",
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
-      "blockedReason": "Local withdrawal-to-claim and settlement-helper checks passed, but the integrated XLM settlement driver and real provider/signature binding remain incomplete. No live payout is proved; production XLM stays Frozen.",
-      "nextAction": "Implement the integrated settlement driver against native-xlm-settlement-driver-handoff.md: two guards, post-read freshness, signature snapshot binding, prepared resume and reconcile-before-replacement. Transport validation now passes; live invocation remains held.",
+      "blockedReason": "The integrated driver is missing. Original implementation-session included capacity is not currently verified; the temporary extra-Claude window expired. Routine source authority remains, but no paid/replacement executor is authorized.",
+      "nextAction": "Resolve the verified included-capacity route for the existing source executor with Cody, then implement the six accepted driver requirements and mocked cases. Transport validation already passes; no duplicate runtime or live invocation.",
       "cardIds": [
         "WP4"
       ]
@@ -85,7 +85,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Preserve the 22-test Horizon transport plus feature-off compile PASS. Next validate the integrated driver with mocked lifecycle acceptance cases under a fresh allocation; live testnet readiness remains unproved.",
+      "nextAction": "Preserve the 22-test transport and feature-off compile PASS. No driver source delta exists yet; after original-executor capacity and source are concrete, request one bounded mocked integration batch under fresh allocation. Live readiness remains unproved.",
       "cardIds": [
         "WP6"
       ]
