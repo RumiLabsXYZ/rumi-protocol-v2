@@ -59,5 +59,11 @@
     "Exact random historical A/B snapshots not supplied by the inspected records",
     "Earlier debt hidden-clock residual remains nonzero prior evidence"
   ],
-  "funding_or_credit_or_policy_changes": false
+  "funding_or_credit_or_policy_changes": false,
+  "next_input_readiness": {
+    "outside_anchor_depositors": 2,
+    "outside_positive_icUSD_at_saved_Nov10_endpoint": 2,
+    "outside_zero_icUSD_at_saved_Nov10_endpoint": 0,
+    "initial_balance_or_full_period_proven": false
+  }
 }
