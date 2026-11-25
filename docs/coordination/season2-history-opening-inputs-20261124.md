@@ -35,7 +35,7 @@ A numerical allocation needs the two owners' opening icUSD balances from an auth
 
 The next independent retained-input check found a complete later13-position global read set. Its local file writes fall in a no-recorded-event window before the next SP event; the48 subsequent source records through T0 are all InterestReceived. Those facts describe a **later endpoint/proxy**, not a November1 opening checkpoint. No new allocation or replay was run from it, and it was not substituted for missing earlier state.
 
-No fresh simulation, repeated receipt extraction, build, live canister call, credit, compensation, private export or policy change occurred in this follow-up. Existing prospective scoring and scheduled captures remain independent. Next useful accepted work is locating authentic earlier SP state in recorded owner/release evidence; the stopped calculation resumes only when its required inputs are established. All existing action holds remain unchanged.
+No fresh simulation, repeated receipt extraction, build, Rumi production canister call, credit, compensation, private export or policy change occurred in this follow-up. Existing prospective scoring and scheduled captures remain independent. Next useful accepted work is locating authentic earlier SP state in recorded owner/release evidence; the stopped calculation resumes only when its required inputs are established. All existing action holds remain unchanged.
 
 
 ## Next ready retained-source check: analytics capability

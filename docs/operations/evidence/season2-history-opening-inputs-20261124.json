@@ -76,7 +76,6 @@
   "numeric_allocations_computed": false,
   "fresh_simulations_or_replays": 0,
   "receipt_reextractions": 0,
-  "live_calls": 0,
   "credits_or_policy_changes": false,
   "private_exports": false,
   "next_accepted_analytics_input_check": {
@@ -102,5 +101,6 @@
       "src/rumi_analytics/src/queries/address_value.rs": "4cf72d967fe62010b3379e4feba7ce8f85466a2244b53df1ae82c80d8fca29fb",
       "src/rumi_analytics/src/types.rs": "1bde2d69d83dbab20d4122c132aad771df50408d12f121c859e1b1f0e0e32a7b"
     }
-  }
+  },
+  "Rumi_production_calls": 0
 }
