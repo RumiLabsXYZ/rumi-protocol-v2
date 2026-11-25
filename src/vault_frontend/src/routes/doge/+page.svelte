@@ -813,7 +813,13 @@
                     {confirmation.meter.confirmations} / {confirmation.meter.requiredConfirmations} confirmations
                   </p>
                 {:else if confirmation.phase !== 'minted' && confirmation.phase !== 'error'}
-                  <p class="doge-panel-sub">No deposit detected on this address yet.</p>
+                  <p class="doge-panel-sub">
+                    {#if utxoStatuses.some((status) => status.kind === 'Checked')}
+                      Deposit confirmed and waiting to mint. Confirmation count unavailable.
+                    {:else}
+                      No deposit detected on this address yet.
+                    {/if}
+                  </p>
                 {/if}
               </div>
 
