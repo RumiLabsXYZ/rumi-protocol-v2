@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import LensHealthStrip from '../LensHealthStrip.svelte';
   import LensActivityPanel from '../LensActivityPanel.svelte';
   import MiniAreaChart from '../MiniAreaChart.svelte';
@@ -10,8 +10,9 @@
   } from '$services/explorer/analyticsService';
   import {
     fetchInterestSplit, fetchStabilityPoolStatus, fetchThreePoolStatus,
-    fetchProtocolFeeTotalsFromBackend,
+    createProtocolFeeScan,
   } from '$services/explorer/explorerService';
+  import { completeFee, formatFeeE8s, type FeeScanState } from '$services/explorer/feeScan';
   import { ProtocolService } from '$services/protocol';
   import { e8sToNumber, formatCompact, CHART_COLORS } from '$utils/explorerChartHelpers';
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
@@ -21,17 +22,25 @@
   let apys: any = $state(null);
   let fees24hData = $state<FeeBreakdown | null>(null);
   let fees90dData = $state<FeeBreakdown | null>(null);
-  let backendFees24h = $state<{ borrowIcusd: number; redemptionIcusd: number } | null>(null);
-  let backendFees90d = $state<{ borrowIcusd: number; redemptionIcusd: number } | null>(null);
+  let feeScan = $state.raw<FeeScanState | null>(null);
+  let scan: ReturnType<typeof createProtocolFeeScan> | undefined;
+  let disposed = false;
+  function runFees(refresh = false) {
+    if (refresh) { scan?.cancel(); scan = undefined; }
+    scan ??= createProtocolFeeScan({ refresh });
+    const active = scan;
+    feeScan = active.snapshot();
+    void active.run(next => { if (!disposed && scan === active) feeScan = next; });
+  }
+  onDestroy(() => { disposed = true; scan?.cancel(); });
   let interestSplit: any[] = $state([]);
   let protocolStatus: any = $state(null);
   let poolStatus: any = $state(null);
   let threePoolStatus: any = $state(null);
   let loading = $state(true);
 
-  const MS_PER_DAY = 86_400_000;
-
   onMount(async () => {
+    runFees();
     try {
       // Borrow / redemption fees come from the backend event log directly.
       // The analytics rollup (`fetchFeeBreakdownWindow`) reads `evt_vaults`
@@ -39,7 +48,7 @@
       // capture; pre-round-1 entries are stuck at null), which is why the
       // 90d totals previously showed only swap fees. Swap fees stay on
       // analytics (`evt_swaps` was always populated correctly).
-      const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR, b24R, b90R] = await Promise.allSettled([
+      const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR] = await Promise.allSettled([
         fetchFeeSeries(90, { throwOnError: true }),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
@@ -48,8 +57,6 @@
         ProtocolService.getProtocolStatus(),
         fetchStabilityPoolStatus(),
         fetchThreePoolStatus(),
-        fetchProtocolFeeTotalsFromBackend(MS_PER_DAY),
-        fetchProtocolFeeTotalsFromBackend(90 * MS_PER_DAY),
       ]);
       if (feeR.status === 'fulfilled') {
         feeRows = feeR.value ?? [];
@@ -64,8 +71,6 @@
       if (psR.status === 'fulfilled') protocolStatus = psR.value;
       if (poolR.status === 'fulfilled') poolStatus = poolR.value;
       if (tpR.status === 'fulfilled') threePoolStatus = tpR.value;
-      if (b24R.status === 'fulfilled') backendFees24h = b24R.value;
-      if (b90R.status === 'fulfilled') backendFees90d = b90R.value;
     } catch (err) {
       console.error('[RevenueLens] onMount error:', err);
     } finally {
@@ -75,19 +80,22 @@
 
   // Borrow / redemption: backend event log (authoritative). Swap: analytics
   // (`evt_swaps` was always populated correctly by the 3pool / AMM tailers).
-  const totalBorrow = $derived(backendFees90d?.borrowIcusd ?? null);
-  const totalRedemption = $derived(backendFees90d?.redemptionIcusd ?? null);
+  const totalBorrow = $derived(completeFee(feeScan, 1, 'borrow'));
+  const totalRedemption = $derived(completeFee(feeScan, 1, 'redemption'));
   const totalSwap = $derived(fees90dData?.swapIcusd ?? null);
   const totalFees = $derived(
     totalBorrow != null && totalRedemption != null && totalSwap != null
-      ? totalBorrow + totalRedemption + totalSwap
+      ? Number(totalBorrow + totalRedemption) / 1e8 + totalSwap
       : null
   );
 
+  const borrow24h = $derived(completeFee(feeScan, 0, 'borrow'));
+  const redemption24h = $derived(completeFee(feeScan, 0, 'redemption'));
+  // These combined headlines include approximate analytics swap values. Exact
+  // backend amounts are kept as bigint and rendered separately below.
   const fees24h = $derived(
-    backendFees24h != null && fees24hData != null
-      ? backendFees24h.borrowIcusd + backendFees24h.redemptionIcusd + fees24hData.swapIcusd
-      : null
+    borrow24h != null && redemption24h != null && fees24hData != null
+      ? Number(borrow24h + redemption24h) / 1e8 + fees24hData.swapIcusd : null
   );
 
   // Live formulas first; analytics 7d rolling as the fallback (the rolling
@@ -137,8 +145,8 @@
   });
 
   const healthMetrics = $derived.by(() => [
-    { label: 'Fees (90d)', value: totalFees == null ? 'Unavailable' : `$${formatCompact(totalFees)}` },
-    { label: '24h fees', value: fees24h == null ? 'Unavailable' : `$${formatCompact(fees24h)}` },
+    { label: 'Fees (90d)', value: totalFees == null ? 'Unavailable' : `≈$${formatCompact(totalFees)}` },
+    { label: '24h fees', value: fees24h == null ? 'Unavailable' : `≈$${formatCompact(fees24h)}` },
     { label: '3Pool LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: lpApySub },
     { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: spApySub },
     {
@@ -163,6 +171,49 @@
 </script>
 
 <LensHealthStrip title="Revenue" metrics={healthMetrics} loading={loading} />
+
+<section class="explorer-card text-sm space-y-3" aria-label="Borrowing and redemption fee coverage">
+  <h3 class="font-medium">Borrowing and redemption fees</h3>
+  <p aria-live="polite">
+    {#if !feeScan || feeScan.phase === 'idle'}Loading fee history…
+    {:else if feeScan.phase === 'error'}Unavailable — scan failed.
+    {:else if feeScan.phase === 'scanning'}Scanning fee history…
+    {:else if feeScan.phase === 'incomplete'}Incomplete — more history remains.
+    {:else if feeScan.undated.borrow.count > 0n || feeScan.undated.redemption.count > 0n}Incomplete — historical fee records have no timestamp.
+    {:else}Fee history complete for this snapshot.{/if}
+    {#if feeScan?.end != null} Scanned {feeScan.cursor.toString()} of {feeScan.end.toString()} records.{/if}
+  </p>
+  {#if feeScan}
+    <p class="text-gray-400">As of {new Date(Number(feeScan.asOfNs / 1_000_000n)).toISOString()}.
+      {#if feeScan.end === 0n}Empty event-log snapshot.
+      {:else if feeScan.end != null}Recorded through event {(feeScan.end - 1n).toString()}.{/if}
+      Later records are included on refresh. Large histories may need several Continue steps.
+    </p>
+    {#each feeScan.windows as window, index}
+      <dl aria-label="{index === 0 ? '24h' : '90d'} exact backend fees" class="space-y-1">
+        {#each ['borrow', 'redemption'] as category}
+          {@const kind = category as 'borrow' | 'redemption'}
+          {@const total = completeFee(feeScan, index, kind)}
+          <div class="flex flex-wrap justify-between gap-2">
+            <dt>{index === 0 ? '24h' : '90d'} {kind === 'borrow' ? 'borrowing' : 'redemption'}</dt>
+            <dd class="tabular-nums break-all">{#if total != null}{formatFeeE8s(total)} icUSD{:else}Unavailable — partial known-dated subtotal: {formatFeeE8s(window[kind])} icUSD{/if}</dd>
+          </div>
+        {/each}
+      </dl>
+    {/each}
+    {#each ['borrow', 'redemption'] as category}
+      {@const kind = category as 'borrow' | 'redemption'}
+      {#if feeScan.undated[kind].count > 0n}
+        <p class="text-amber-300">{feeScan.undated[kind].count.toString()} undated {kind === 'borrow' ? 'borrowing' : 'redemption'} fee records ({formatFeeE8s(feeScan.undated[kind].amount)} icUSD) cannot be assigned to a time window. Retrying does not recover missing timestamps.</p>
+      {/if}
+    {/each}
+  {/if}
+  <div class="flex gap-3">
+    {#if feeScan?.phase === 'incomplete'}<button class="text-teal-400" onclick={() => runFees()}>Continue</button>{/if}
+    {#if feeScan?.phase === 'error'}<button class="text-teal-400" onclick={() => runFees()}>Retry fee scan</button>{/if}
+    <button class="text-teal-400 disabled:opacity-50" disabled={!feeScan || feeScan.phase === 'scanning'} onclick={() => runFees(true)}>Refresh fee snapshot</button>
+  </div>
+</section>
 
 <div class="explorer-card" role="region" aria-label="Daily swap fees over 90 days">
   {#if feeSeriesState === 'loading'}
@@ -193,9 +244,9 @@
       </div>
     {:else}
       {@const items = [
-        { label: 'Borrowing', value: totalBorrow, color: CHART_COLORS.teal },
-        { label: 'Redemption', value: totalRedemption, color: CHART_COLORS.purple },
-        { label: 'Swap', value: totalSwap, color: CHART_COLORS.action },
+        { label: 'Borrowing', value: totalBorrow == null ? null : Number(totalBorrow) / 1e8, exact: totalBorrow == null ? null : `${formatFeeE8s(totalBorrow)} icUSD`, color: CHART_COLORS.teal },
+        { label: 'Redemption', value: totalRedemption == null ? null : Number(totalRedemption) / 1e8, exact: totalRedemption == null ? null : `${formatFeeE8s(totalRedemption)} icUSD`, color: CHART_COLORS.purple },
+        { label: 'Swap', value: totalSwap, exact: null, color: CHART_COLORS.action },
       ]}
       {@const max = Math.max(1, ...items.map((item) => item.value ?? 0))}
       <div class="space-y-2">
@@ -205,7 +256,7 @@
             <div class="flex-1 h-4 rounded-sm overflow-hidden" style="background: var(--rumi-bg-surface2);">
               <div class="h-full rounded-sm" style="width: {((it.value ?? 0) / max) * 100}%; background: {it.color}; opacity: 0.7;"></div>
             </div>
-            <span class="w-20 text-right tabular-nums text-gray-300">{it.value == null ? 'Unavailable' : `$${formatCompact(it.value)}`}</span>
+            <span class="min-w-20 text-right tabular-nums text-gray-300">{it.value == null ? 'Unavailable' : it.exact ?? `≈$${formatCompact(it.value)}`}</span>
           </div>
         {/each}
       </div>

@@ -7,6 +7,7 @@
  */
 
 import { Principal } from '@dfinity/principal';
+import { applyFeePage, copyFeeScan, feeNat, newFeeScan, FEE_WINDOWS_NS, FEE_SCAN_SIZE, FEE_SCAN_PAGES_PER_RUN, type FeeScanState } from './feeScan';
 import {
 	fetchDiscoveredCollateralConfigs,
 	fetchLegacyCollateralConfigs,
@@ -785,75 +786,65 @@ export async function fetchEvents(
 	}
 }
 
-/**
- * Authoritative fee totals for a trailing window, sourced directly from the
- * backend event log. The analytics canister's `get_fee_breakdown_window`
- * derives borrow / redemption fees from `evt_vaults`, but historical entries
- * there were ingested before the analytics tailer captured `fee_amount` (the
- * column was added in round-1; rows ingested before that have `None`). This
- * function paginates the backend's filtered event log, which has authoritative
- * `fee_amount` on every Borrow / Redemption variant, and sums them.
- *
- * Returns icUSD values (e8s normalized). A failed or capped scan rejects so
- * callers cannot present a partial total as complete.
+/** One cancellable, resumable fee snapshot shared by the 24h and 90d views.
+ * Cancellation discards a pending reply and prevents subsequent requests; it
+ * cannot undo a read already dispatched through the agent.
  */
-export async function fetchProtocolFeeTotalsFromBackend(
-	windowMs: number,
-): Promise<{ borrowIcusd: number; redemptionIcusd: number; borrowCount: number; redemptionCount: number }> {
-	const key = `events:fee_totals:${windowMs}`;
-	const cached = getCached<{ borrowIcusd: number; redemptionIcusd: number; borrowCount: number; redemptionCount: number }>(key, TTL.EVENTS);
-	if (cached) return cached;
+export function createProtocolFeeScan({ refresh = false } = {}) {
+	const backend = Actor.canisterIdOf(publicActor).toText();
+	const latestKey = `events:fee_scan_latest:${backend}:${FEE_WINDOWS_NS.join(',')}`;
+	const cachedKey = refresh ? undefined : getCached<string>(latestKey, TTL.EVENTS);
+	const cached = cachedKey ? getCached<FeeScanState>(cachedKey, TTL.EVENTS) : undefined;
+	let state = cached ? copyFeeScan(cached) : newFeeScan(backend, BigInt(Date.now()) * 1_000_000n);
+	let cancelled = false;
+	let inFlight: Promise<FeeScanState> | null = null;
+	const snapshot = () => copyFeeScan(state);
 
-	const nowNs = BigInt(Date.now()) * 1_000_000n;
-	const startNs = nowNs - BigInt(windowMs) * 1_000_000n;
-	const PAGE_SIZE = 200n;
-	const MAX_PAGES = 25; // 5,000-event ceiling; ~30x current 90d count
-
-	let borrowFeesE8s = 0n;
-	let redemptionFeesE8s = 0n;
-	let borrowCount = 0;
-	let redemptionCount = 0;
-	let page = 0n;
-	let processed = 0n;
-	let complete = false;
-
-	for (let p = 0; p < MAX_PAGES; p++) {
-		const result = await fetchEvents(page, PAGE_SIZE, {
-			types: ['Borrow', 'Redemption'],
-			time_range: { start_ns: startNs, end_ns: nowNs },
-		}, true);
-		if (result.events.length === 0) {
-			if (processed < result.total) throw new Error('Fee event scan incomplete: an expected page was empty');
-			complete = true;
-			break;
+	function run(onProgress: (state: FeeScanState) => void = () => {}): Promise<FeeScanState> {
+		if (inFlight) return inFlight;
+		if (cancelled || state.phase === 'complete') {
+			if (!cancelled) onProgress(snapshot());
+			return Promise.resolve(snapshot());
 		}
-		for (const [, evt] of result.events) {
-			const variantKey = Object.keys(evt ?? {})[0];
-			const data = evt?.[variantKey] ?? {};
-			if (variantKey === 'borrow_from_vault') {
-				borrowFeesE8s += BigInt(data.fee_amount ?? 0);
-				borrowCount += 1;
-			} else if (variantKey === 'redemption_on_vaults') {
-				redemptionFeesE8s += BigInt(data.fee_amount ?? 0);
-				redemptionCount += 1;
+		// Schedule after assigning inFlight so even a reentrant observer shares it.
+		inFlight = Promise.resolve().then(async () => {
+			if (cancelled) return snapshot();
+			state = { ...state, phase: 'scanning', error: null };
+			onProgress(snapshot());
+			try {
+				if (state.end === null) {
+					const end = feeNat(await publicActor.get_event_count());
+					if (cancelled) return snapshot();
+					state = { ...state, end, phase: end === 0n ? 'complete' : 'scanning' };
+					onProgress(snapshot());
+				}
+				for (let page = 0; !cancelled && page < FEE_SCAN_PAGES_PER_RUN && state.cursor < state.end!; page++) {
+					const remaining = state.end! - state.cursor;
+					const scan = remaining < FEE_SCAN_SIZE ? remaining : FEE_SCAN_SIZE;
+					const reply = await publicActor.get_events_forward_filtered(state.cursor, scan, [[{ Borrow: null }, { Redemption: null }]]);
+					if (cancelled) return snapshot();
+					state = applyFeePage(state, reply, scan);
+					onProgress(snapshot());
+				}
+				if (cancelled) return snapshot();
+				state = { ...state, phase: state.cursor === state.end ? 'complete' : 'incomplete' };
+				if (state.phase === 'complete' && state.undated.borrow.count === 0n && state.undated.redemption.count === 0n) {
+					const key = `events:fee_scan:${backend}:${FEE_WINDOWS_NS.join(',')}:${state.asOfNs}:${state.end}`;
+					const previousKey = cache.get(latestKey)?.data;
+					if (typeof previousKey === 'string') cache.delete(previousKey);
+					setCache(key, snapshot());
+					setCache(latestKey, key);
+				}
+			} catch (err) {
+				if (cancelled) return snapshot();
+				state = { ...state, phase: 'error', error: err instanceof Error ? err.message : 'Fee scan failed' };
 			}
-		}
-		processed += BigInt(result.events.length);
-		if (processed >= result.total) {
-			complete = true;
-			break;
-		}
-		page += 1n;
+			onProgress(snapshot());
+			return snapshot();
+		}).finally(() => { inFlight = null; });
+		return inFlight;
 	}
-	if (!complete) throw new Error(`Fee event scan incomplete after ${MAX_PAGES} pages`);
-
-	const out = {
-		borrowIcusd: Number(borrowFeesE8s) / 1e8,
-		redemptionIcusd: Number(redemptionFeesE8s) / 1e8,
-		borrowCount,
-		redemptionCount,
-	};
-	return setCache(key, out);
+	return { snapshot, run, cancel() { cancelled = true; state = { ...state, phase: 'cancelled' }; } };
 }
 
 /**
