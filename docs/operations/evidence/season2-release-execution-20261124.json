@@ -1,0 +1,90 @@
+{
+  "packet": "32fdd7ac",
+  "packet_sha256": "4abbbbe3da9b51431c9ca4546c35a97d894cf03dedba247b5ddc26c60d785266",
+  "approval": "direct human approval in Orin chat November24 Pacific",
+  "state": "approved release deployed and activated; ordinary automatic cursor progress independently observed",
+  "scorer": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "scorer_source": "2d0be167f492a349b1d1ccabe50624850abe527b",
+  "gzip_module_sha256": "7c2bccf91c018fc0ad5ce9cf7338a9c2c4974c36a5b0114dd5defbc46f07175f",
+  "funding": {
+    "ledger": "um5iw-rqaaa-aaaaq-qaaba-cai",
+    "block": 17318269,
+    "execution_cycles": 1000000000000,
+    "fee": 100000000,
+    "payer_debit": 1000100000000,
+    "remaining_payer_balance": 2400450044313,
+    "executions": 1,
+    "destination_memo_bound": true
+  },
+  "backup": {
+    "created_while_stopped": true,
+    "private_download_and_file_hashes_verified": true,
+    "old_module_gzip_sha256": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c"
+  },
+  "archive": {
+    "archived_epoch": 0,
+    "participants": 15,
+    "snapshot_rows": 15,
+    "digest_sha256": "6643a7d9f5f4ddaf6591d0d05b50dbcbb480f595669532cf2b7436cc8d82a2d2",
+    "missed_coverage": "pending; no forfeiture, compensation or invented award"
+  },
+  "frontend": {
+    "canister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+    "source": "9a846fa09b5f47f183ab5f9aa2cf7b9989a8ce59",
+    "manifest_sha256": "9b45bbc916bf798c5a4b83cd8acceba3cc9b24ba51d2f3d85beae86fec05b0e7",
+    "old_keys_preserved": 1727,
+    "new_total_keys": 1899,
+    "changed_encoding_hashes_verified": 658,
+    "served_index_sha256": "4b3a11703bf631fc9c4dc3aa269149e6aba8eb807f3b6b95f237cf84f397d9e7",
+    "wasm_controllers_environment_and_existing_properties_unchanged": true,
+    "browser_s2_status_and_separate_s1_history_verified": true
+  },
+  "financial_sp_and_other_release_holds": "unchanged",
+  "missed_historical_awards_issued": false,
+  "activation": {
+    "active_epoch": 1,
+    "active_start_ns": "1795582931640597134",
+    "active_end_ns": "1795736700000000000",
+    "active_start_utc": "2026-11-25T05:02:11.640Z",
+    "active_end_utc": "2026-11-26T23:45:00Z",
+    "pending_coverage_start_ns": "1794527100000000000",
+    "pending_coverage_end_ns": "1795582931640597134",
+    "archive_digest_unchanged": true,
+    "legacy_transition_held": false,
+    "poll_enabled": true,
+    "driver_enabled": true,
+    "interval_secs": 300,
+    "ordinary_points_immediately_after_activation": 0,
+    "ledger_rows_immediately_after_activation": 0,
+    "epoch_summaries_immediately_after_activation": 0,
+    "bootstrap_and_backfill_bytes_unchanged": true
+  },
+  "catchup": {
+    "successful_bounded_passes": 26,
+    "cursors_at_activation": [
+      583324,
+      116,
+      2818,
+      5
+    ]
+  },
+  "scorer_balance_after_activation": 1134930808437,
+  "browser_after_activation": "Points page and global Borrow banner show Activity tracking configured; weekly awards pending. No Season 2 points awarded yet. Pending earlier coverage remains visible; S1 history separate.",
+  "ordinary_timer_observation": {
+    "before_cursors": [
+      583324,
+      116,
+      2818,
+      5
+    ],
+    "after_cursors": [
+      583329,
+      116,
+      2818,
+      5
+    ],
+    "no_manual_poll_or_tick_after_activation": true,
+    "snapshot_a_complete": false,
+    "snapshot_b_complete": false
+  }
+}
