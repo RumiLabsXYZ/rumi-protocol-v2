@@ -1,0 +1,63 @@
+{
+  "scope": "S2-HISTORY-01 retained interest provenance; source evidence only, no awards",
+  "journal": {
+    "prior_snapshot_prefix_byte_identical": true,
+    "private_journal_entries": 6567,
+    "pre_T0_Nov1_SP_operations": 221,
+    "ordered_four_phase_lifecycles": 221,
+    "unique_accepted_mint_blocks": 221,
+    "explicit_collateral_routes": 6,
+    "public_interval_interest_events": 221,
+    "unique_amount_token_candidate_joins": 221,
+    "unpaired_interest_events": 0,
+    "missing_candidates": 0,
+    "ambiguous_candidates": 0,
+    "SP_event_nonce_binding": false,
+    "per_owner_allocation_proven": false,
+    "historical_awards_proven": false,
+    "raw_exported": false
+  },
+  "ledger_receipt_binding": {
+    "requested_distinct_blocks": 221,
+    "returned_distinct_blocks": 221,
+    "exact_tuple_field_matching_counts": {
+      "mint_op": 221,
+      "amount": 221,
+      "memo": 221,
+      "created_at_time": 221,
+      "recipient": 221,
+      "default_subaccount": 221,
+      "memo_nonce": 221,
+      "observed_mint_before_SP_event": 221
+    },
+    "mismatched_tuples": 0,
+    "exact_integer_comparison": true,
+    "anonymous_public_ledger_read_queries": 6,
+    "updates_or_transfers": 0,
+    "complete_phase_bound_collateral_mint_operations": 221,
+    "explicit_collateral_routes": 6,
+    "unique_amount_token_SP_event_candidate_joins": 221,
+    "unpaired_interval_interest_events": 0,
+    "SP_event_nonce_or_per_owner_allocation_binding": false,
+    "historical_awards_proven": false,
+    "raw_exported": false
+  },
+  "preference_delta_coverage": {
+    "recorded_interval_preference_events": 2,
+    "events_with_caller_in_saved_cohort": 2,
+    "events_outside_saved_cohort": 0,
+    "by_kind": {
+      "OptOutCollateral": 2
+    },
+    "does_not_prove_initial_external_owner_preferences": true,
+    "read_only": true
+  },
+  "remaining_limits": [
+    "Public SP event has no mint nonce: unique amount/token/timing event join remains an inference",
+    "Two later global depositors lack matching original Nov1 position anchors",
+    "Per-owner eligible balance denominator and rounding allocation remain unproved",
+    "Exact random historical A/B snapshots not supplied by the inspected records",
+    "Earlier debt hidden-clock residual remains nonzero prior evidence"
+  ],
+  "funding_or_credit_or_policy_changes": false
+}
