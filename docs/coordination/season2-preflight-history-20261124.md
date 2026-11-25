@@ -38,3 +38,9 @@ Recommendation: continue prospective release under its already-approved contract
 ## Evidence boundary
 
 Private journal records each read's command, timestamps, exit status and output hashes. The production stop has a separate rejection receipt and no command process. Raw participant rows, private seeds, future capture schedule and snapshot bytes remain local. Worktree inventory removed zero; guarded cleanup could not refresh origin because `.git/FETCH_HEAD` was not writable. Locked/dirty/unmerged worktrees were preserved.
+
+## Independent SP stream audit after the initial provenance checkpoint
+
+The next already-allocated category check verified all39 inputs of the later SP cohort reconciliation: zero missing/mismatched files. Independently merging its five full source pages and tail yields **2,548 distinct events, IDs0–2547, zero gaps, 62 identical overlap rows and zero conflicting overlaps**. This supersedes the earlier baseline's export-gap note for that frozen endpoint. It does not prove later coverage through T0 or a current live source tail.
+
+Complete event IDs still do not establish exact historical per-owner SP allocations, eligibility or random snapshot holdings. The retained later model explicitly uses loose allocation bounds and a post-cutoff endpoint proxy; its cutoff is November10 16:00UTC, not the final November12 T0. No replay, credit or fitted timestamp was added. Next history work should target actual hidden-clock/operation receipts and the remaining endpoint/eligibility evidence, keeping event completeness distinct from award completeness.
