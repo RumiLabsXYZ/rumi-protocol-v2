@@ -1,0 +1,65 @@
+{
+  "scope": "S2-HISTORY-01 offline retained T0 boundary audit; no network reads, mutations, replay, model fit or credits",
+  "sp": {
+    "raw_candid_matches_retained_summary": true,
+    "summary_matches_original_bootstrap_hash": true,
+    "pinned_did_source": "4117ba1b",
+    "pinned_did_sha256": "c9189e033bc2dd86cf5453a89eb2661b80088ddd101cc34c6d03e5bfc1f650e4",
+    "previous_unique_events": 2548,
+    "unique_events": 2596,
+    "first_id": 0,
+    "last_id": 2595,
+    "new_unique_events": 48,
+    "matching_T0_overlap_rows": 164,
+    "conflicting_overlap_rows": 0,
+    "missing_ids": 0,
+    "monotonic_timestamps": true,
+    "T0_ns": "1794527100000000000",
+    "last_retained_event_ns": "1794525877908532806",
+    "retained_events_at_or_after_T0": 0,
+    "interval_event_type_counts": {
+      "InterestReceived": 221,
+      "LiquidationNotification": 1,
+      "LiquidationExecuted": 1,
+      "OptOutCollateral": 2
+    },
+    "interval_deposit_withdraw_events": 0,
+    "source_capture_start_utc": "2026-11-12T23:45:17.510Z",
+    "source_capture_end_utc": "2026-11-12T23:45:18.752Z",
+    "exact_historical_awards_proven": false,
+    "credits_issued": false
+  },
+  "threeusd": {
+    "baseline_log_length": "2489",
+    "T0_log_length": "2489",
+    "T0_last_block_id": "2488",
+    "T0_last_block_timestamp_ns": "1791426538647813278",
+    "T0_capture_start_utc": "2026-11-12T23:45:21.044Z",
+    "T0_capture_end_utc": "2026-11-12T23:45:22.448Z",
+    "observed_log_length_delta": 0,
+    "participant_balance_queries_in_T0_capture": 0,
+    "not_a_random_snapshot": true,
+    "exact_historical_awards_proven": false
+  },
+  "remaining_gaps": [
+    "Per-owner interest allocation/collateral eligibility provenance",
+    "Exact historical random A/B snapshots absent from the inspected T0 collection",
+    "Earlier debt hidden-clock/source-operation provenance and nonzero prior residual",
+    "T0 global event and ledger queries are not atomic participant position observations"
+  ],
+  "SP_preference_anchor_binding": {
+    "original_SP_text_responses_typed_decoded": 15,
+    "original_text_vs_retained_typed_full_response_matches": 15,
+    "binary_provenance": "typed re-encoding of retained Candid text; not original response bytes",
+    "nonempty_positions": 11,
+    "explicit_empty_positions": 4,
+    "nonempty_original_text_with_opted_out_field": 11,
+    "nonempty_original_text_with_eligible_field": 11,
+    "eligible_option_present": 11,
+    "anchor_is_midnight": false,
+    "global_saved_Nov10_depositors": 13,
+    "global_saved_depositors_matching_Nov1_position_anchors": 11,
+    "global_saved_depositors_without_matching_Nov1_position_anchors": 2,
+    "full_historical_allocation_proven": false
+  }
+}
