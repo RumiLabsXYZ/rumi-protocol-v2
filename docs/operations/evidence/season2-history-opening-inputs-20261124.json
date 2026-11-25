@@ -1,0 +1,106 @@
+{
+  "question": "Opening balance and eligibility of two outside-anchor SP depositors",
+  "result": "Opening state not established in inspected records; numerical owner allocation stopped",
+  "owners": [
+    {
+      "label": "outside_1",
+      "position_deposit_timestamp_precedes_first_event": true,
+      "recorded_deposit_events": 0,
+      "deposit_timestamp_matches_recorded_deposit": false,
+      "endpoint_opted_out_count": 0,
+      "endpoint_eligible_collaterals": 10,
+      "endpoint_payout_addresses": 0,
+      "opening_balance_proven": false
+    },
+    {
+      "label": "outside_2",
+      "position_deposit_timestamp_precedes_first_event": false,
+      "recorded_deposit_events": 1,
+      "deposit_timestamp_matches_recorded_deposit": true,
+      "endpoint_opted_out_count": 0,
+      "endpoint_eligible_collaterals": 10,
+      "endpoint_payout_addresses": 0,
+      "opening_balance_proven": false
+    }
+  ],
+  "endpoint_route_eligibility": [
+    {
+      "label": "outside_1",
+      "distinct_interval_collateral_routes": 6,
+      "interval_routes_in_saved_endpoint_eligibility": 5,
+      "endpoint_opted_out_entries": 0,
+      "eligibility_at_Nov1_proven": false
+    },
+    {
+      "label": "outside_2",
+      "distinct_interval_collateral_routes": 6,
+      "interval_routes_in_saved_endpoint_eligibility": 5,
+      "endpoint_opted_out_entries": 0,
+      "eligibility_at_Nov1_proven": false
+    }
+  ],
+  "snapshot_availability_scope": {
+    "inspected_primary_recovery_snapshot_modules": 21,
+    "SP_snapshots_in_inspected_set": 0,
+    "not_a_host_wide_absence_claim": true
+  },
+  "pinned_rules": {
+    "commit": "4117ba1b2dab87dd03994feada05fd5e62e1d648",
+    "source_sha256": {
+      "src/stability_pool/src/state.rs": "be4afed462b7e264ec52733083149e074a1d0abbe2363980c5caf3dd9286e723",
+      "src/stability_pool/src/types.rs": "e5af573330643ef0e492dff43446630b12746fae78b0d10b4744cf172ed71f4a",
+      "src/rumi_protocol_backend/src/state.rs": "44d48e8ee9f0d5815923c7aece351bec594596965c1e7cd3b26481e0123fb4ad"
+    }
+  },
+  "allocation_recipe": {
+    "weight": "positive pre-credit icUSD balance only, collateral eligibility checked per owner",
+    "denominator": "sum weights over entire eligible SP pool, including owners outside the Points cohort",
+    "provisional_credit": "floor(amount * weight / denominator)",
+    "rounding_dust": "all residual units to first eligible key in pinned Rust BTreeMap Principal iteration",
+    "zero_denominator": "distribution function returns without owner credit; no invented recipient"
+  },
+  "missing_required_inputs": [
+    "Both owners icUSD balance at Nov1 opening or an equivalent earlier complete state checkpoint",
+    "Opening collateral eligibility, registry classification and intervening relevant state transitions",
+    "All eligible holders pre-credit balances at each interest event, including prior interest and liquidation changes"
+  ],
+  "later_checkpoint": {
+    "retained_global_positions": 13,
+    "subsequent_events": 48,
+    "subsequent_event_types": [
+      "InterestReceived"
+    ],
+    "local_file_times_only": true,
+    "not_a_Nov1_substitute": true
+  },
+  "numeric_allocations_computed": false,
+  "fresh_simulations_or_replays": 0,
+  "receipt_reextractions": 0,
+  "live_calls": 0,
+  "credits_or_policy_changes": false,
+  "private_exports": false,
+  "next_accepted_analytics_input_check": {
+    "source_commit": "75db04935a9e1a6119af75d625e4e0c68fa815e3",
+    "checked_working_files_match_commit": true,
+    "daily_SP_rows": "pool aggregates, no owner balances",
+    "top_SP_current_balance": "deposits minus withdrawals, clamped at zero",
+    "address_SP_history": "event-derived deposit minus withdrawal timeline",
+    "SP_event_storage_actions": [
+      "Deposit",
+      "Withdraw",
+      "ClaimReturns"
+    ],
+    "per_owner_interest_and_liquidation_adjustments_in_these_projections": false,
+    "opening_balance_input_provided": false,
+    "live_queries": 0,
+    "simulations": 0,
+    "source_sha256": {
+      "src/rumi_analytics/src/collectors/stability.rs": "113d163790be43d63156bfde72606f6bb7b80f6ac6f0fe70a2de6327f5dcf20f",
+      "src/rumi_analytics/src/storage/mod.rs": "4e8d52299f65188cf785337a962ef75b6058e7da504c5ab4446e3a1a8b93aa31",
+      "src/rumi_analytics/src/storage/events.rs": "cf5d04a36d3d50425ecf2047583d7298e62bc5f4a1ce88909b03a357872377e3",
+      "src/rumi_analytics/src/queries/live.rs": "307b0f15a4a9a37a8e0713ff066e96a5ab6e05bc1dad254eb6ed291e01a89f0e",
+      "src/rumi_analytics/src/queries/address_value.rs": "4cf72d967fe62010b3379e4feba7ce8f85466a2244b53df1ae82c80d8fca29fb",
+      "src/rumi_analytics/src/types.rs": "1bde2d69d83dbab20d4122c132aad771df50408d12f121c859e1b1f0e0e32a7b"
+    }
+  }
+}
