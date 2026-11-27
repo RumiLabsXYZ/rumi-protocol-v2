@@ -760,7 +760,7 @@
         // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
         // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
         const msg = isNativeXrp
-          ? `Withdrawal queued. A claim for ${amount} XRP was created for XRPL settlement.`
+          ? `Withdrawal queued. A claim for ${amount} XRP was created. Open My Vaults and select Check XRP claims to enter your receiving address.`
           : result.oisyResilient
             ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
             : `Withdrew ${amount} ${collateralSymbol}`;
@@ -887,7 +887,7 @@
       if (result.success) {
         const actionLabel = closeAtClick
           ? (isNativeXrp
-              ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
+              ? `Repaid all debt and queued your withdrawable XRP for settlement. Select Check XRP claims in My Vaults. ${nativeXrpKeepOpenCloseCopy()}`
               : 'Repaid and closed vault')
           : 'Repayment confirmed.';
         const msg = result.oisyResilient
@@ -957,7 +957,7 @@
       const result = await protocolService.withdrawCollateralAndCloseVaultBound(ctx, vault.vaultId);
       if (result.success) {
         const msg = isNativeXrp
-          ? `Withdrawable XRP queued for settlement. ${nativeXrpKeepOpenCloseCopy()}`
+          ? `Withdrawable XRP queued for settlement. Select Check XRP claims in My Vaults. ${nativeXrpKeepOpenCloseCopy()}`
           : result.oisyResilient
             ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
             : 'Vault closed. Collateral returned.';

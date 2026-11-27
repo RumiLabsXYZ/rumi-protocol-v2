@@ -36,6 +36,35 @@ export function isIcrcClaimableCollateral(value: PrincipalLike): boolean {
   return !isNativeXrpPrincipal(value);
 }
 
+// XRPL classic-address structural check. SYNC on purpose: it runs in the click
+// handler before the signer call, and any async (e.g. crypto.subtle for a checksum)
+// would burn the browser's user-gesture window and block the Oisy popup. Base58-
+// decodes with the RIPPLE alphabet and requires a 25-byte payload with the classic-
+// address version byte (0x00). The 4-byte checksum is NOT verified here — that needs
+// SHA-256, and the backend already does a full base58+checksum decode before signing
+// (chains/xrp/address.rs). This just catches typos / wrong-alphabet / X-addresses.
+const RIPPLE_B58 = 'rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz';
+export function isValidXrplClassicAddress(addr: string): boolean {
+  if (!addr || addr[0] !== 'r' || addr.length < 25 || addr.length > 35) return false;
+  let num = 0n;
+  for (const ch of addr) {
+    const idx = RIPPLE_B58.indexOf(ch);
+    if (idx < 0) return false; // char outside the ripple base58 alphabet
+    num = num * 58n + BigInt(idx);
+  }
+  const bytes: number[] = [];
+  while (num > 0n) {
+    bytes.unshift(Number(num & 0xffn));
+    num >>= 8n;
+  }
+  // Leading 'r' (alphabet index 0) chars decode to leading zero bytes.
+  for (const ch of addr) {
+    if (ch === 'r') bytes.unshift(0);
+    else break;
+  }
+  return bytes.length === 25 && bytes[0] === 0x00;
+}
+
 export function validateXrpPayoutInput(addressInput: string, destinationTagInput?: string): XrpPayoutValidation {
   const address = addressInput.trim();
   if (!address) {

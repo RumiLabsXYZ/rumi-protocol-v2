@@ -4,6 +4,8 @@
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
+  import XrpWithdrawalClaims from '$lib/components/vault/XrpWithdrawalClaims.svelte';
+  import { walletSessionGeneration } from '$lib/services/auth';
   import XrplIcusdPanel from '$lib/components/vault/XrplIcusdPanel.svelte';
   import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
@@ -104,6 +106,12 @@
       </button>
     {/if}
   </div>
+
+  {#if $isConnected && $principal}
+    {#key `${$principal.toText()}:${$walletSessionGeneration}`}
+      <XrpWithdrawalClaims />
+    {/key}
+  {/if}
 
   {#if !canViewVaults}
     <div class="empty-state glass-card">
