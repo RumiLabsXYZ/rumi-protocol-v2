@@ -19,13 +19,15 @@
  * AUTHENTICATED actor because `get_my_xrp_*` filter by caller.
  */
 
-import type { _SERVICE } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+import type { _SERVICE, XrpClaim } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import { browser } from '$app/environment';
 import { get } from 'svelte/store';
 import { CONFIG } from '../config';
 import { walletStore } from '../stores/wallet';
 import { currentWalletType, WALLET_TYPES } from './auth';
+import { createOisyActor, getOisySignerAgent, openOisySignerChannel } from './oisySigner';
+import { assertActionBoundContextCurrent, type ActionBoundContext } from './protocol/walletOperations';
 import { ApiClient } from './protocol/apiClient';
 import { callWithOisyFalseNegativeGuard, isOisyLandedSentinel } from './protocol/oisyResilience';
 import { mapOptionalXrpClaimId, xrpClaimIdToBigInt, type XrpClaimId } from './xrpPayoutHelpers';
@@ -263,9 +265,42 @@ function normalizeXrpError(error: unknown): string {
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
+function toClaimView([claimId, c]: [bigint, XrpClaim]): XrpClaimView {
+  const settlement = c.settlement.length > 0 ? c.settlement[0] : null;
+  const custodyNonce = Number(c.custody_nonce);
+  return {
+    claimId: mapOptionalXrpClaimId([claimId]) ?? claimId.toString(),
+    drops: c.drops,
+    xrp: dropsToXrp(c.drops),
+    createdAtMs: Number(c.created_at_ns / 1_000_000n),
+    custodyNonce,
+    vaultId: custodyNonce,
+    inFlight: settlement !== null,
+    inFlightTxHash: settlement ? settlement.tx_hash : null,
+    quarantineReason: c.quarantine_reason.length > 0 ? c.quarantine_reason[0] ?? null : null,
+  };
+}
+
 export class XrpVaultService {
   private static async actor(): Promise<_SERVICE> {
     return (await walletStore.getActor(CONFIG.currentCanisterId, rumi_backendIDL)) as _SERVICE;
+  }
+
+  /** The shared Oisy signer is pre-warmed by the root layout. Open it from the click
+   * before queueing or awaiting an actor so the claimed owner authenticates the read or write. */
+  private static async borrowerClaimActor(ctx: ActionBoundContext): Promise<_SERVICE> {
+    assertActionBoundContextCurrent(ctx);
+    if (isOisySignerWallet()) {
+      const owner = get(walletStore).principal!;
+      await openOisySignerChannel(owner);
+      assertActionBoundContextCurrent(ctx);
+      const agent = await getOisySignerAgent(owner);
+      assertActionBoundContextCurrent(ctx);
+      return createOisyActor(CONFIG.currentCanisterId, rumi_backendIDL, agent);
+    }
+    const actor = await this.actor();
+    assertActionBoundContextCurrent(ctx);
+    return actor;
   }
 
   /**
@@ -381,19 +416,22 @@ export class XrpVaultService {
   static async settleXrpClaim(
     claimId: XrpClaimId | number | bigint,
     destination: string,
-    destinationTag?: number
+    destinationTag?: number,
+    ctx?: ActionBoundContext
   ): Promise<XrpOpResult<{ txHash: string }>> {
-    return ApiClient.executeSequentialOperation(async () => {
-      try {
-        const claimIdBig = xrpClaimIdToBigInt(claimId);
-        const claimIdText = claimIdBig.toString();
-        if (
-          destinationTag !== undefined &&
-          (!Number.isInteger(destinationTag) || destinationTag < 0 || destinationTag > 0xffffffff)
-        ) {
-          return { success: false, error: 'Destination tag must be a whole number from 0 to 4294967295.' };
-        }
-        const actor = await this.actor();
+    try {
+      const claimIdBig = xrpClaimIdToBigInt(claimId);
+      const claimIdText = claimIdBig.toString();
+      if (
+        destinationTag !== undefined &&
+        (!Number.isInteger(destinationTag) || destinationTag < 0 || destinationTag > 0xffffffff)
+      ) {
+        return { success: false, error: 'Destination tag must be a whole number from 0 to 4294967295.' };
+      }
+      const boundActor = ctx ? await this.borrowerClaimActor(ctx) : undefined;
+      return await ApiClient.executeSequentialOperation(async () => {
+        const actor = boundActor ?? await this.actor();
+        if (ctx) assertActionBoundContextCurrent(ctx);
         const operation =
           destinationTag === undefined
             ? () => actor.settle_xrp_claim(claimIdBig, destination)
@@ -406,12 +444,15 @@ export class XrpVaultService {
           // Either way the Payment is on its way — treat it as landed so an Oisy
           // false-negative isn't reported as a hard failure.
           async () => {
+            if (ctx) assertActionBoundContextCurrent(ctx);
             const claims = await actor.get_my_xrp_claims();
+            if (ctx) assertActionBoundContextCurrent(ctx);
             const entry = claims.find(([id]) => id.toString() === claimIdText);
             return !entry || entry[1].settlement.length > 0;
           },
           destinationTag === undefined ? `settle_xrp_claim #${claimIdText}` : `settle_xrp_claim_with_tag #${claimIdText}`
         );
+        if (ctx) assertActionBoundContextCurrent(ctx);
         if (isOisyLandedSentinel(result)) {
           return { success: true, oisyResilient: true, data: { txHash: '' } };
         }
@@ -419,10 +460,10 @@ export class XrpVaultService {
           return { success: true, data: { txHash: result.Ok } };
         }
         return { success: false, error: ApiClient.formatProtocolError(result.Err) };
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : String(e) };
-      }
-    });
+      });
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   /**
@@ -514,6 +555,20 @@ export class XrpVaultService {
     emitPendingDepositsChanged();
   }
 
+  /** Withdrawal form for the owner's own vaults. A failed lookup must stay distinguishable
+   * from a successful read with no remaining claims. Other vaults' liquidation payouts have
+   * their own address and settlement flows. */
+  static async readMyClaims(ctx: ActionBoundContext): Promise<XrpClaimView[]> {
+    const actor = await this.borrowerClaimActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+    const claims = await actor.get_my_xrp_claims();
+    assertActionBoundContextCurrent(ctx);
+    return claims
+      .filter(([, claim]) => claim.claimant.toText() === ctx.expectedPrincipalText &&
+        claim.custody_owner.toText() === ctx.expectedPrincipalText)
+      .map(toClaimView);
+  }
+
   /** The caller's outstanding native-XRP claims (XRP owed back to them). */
   static async getMyClaims(options: XrpReadOptions = {}): Promise<XrpClaimView[]> {
     if (isOisySignerWallet() && !options.allowSigner) {
@@ -523,21 +578,7 @@ export class XrpVaultService {
     try {
       const actor = await this.actor();
       const claims = await actor.get_my_xrp_claims();
-      return claims.map(([claimId, c]) => {
-        const settlement = c.settlement.length > 0 ? c.settlement[0] : null;
-        const custodyNonce = Number(c.custody_nonce);
-        return {
-          claimId: mapOptionalXrpClaimId([claimId]) ?? claimId.toString(),
-          drops: c.drops,
-          xrp: dropsToXrp(c.drops),
-          createdAtMs: Number(c.created_at_ns / 1_000_000n),
-          custodyNonce,
-          vaultId: custodyNonce,
-          inFlight: settlement !== null,
-          inFlightTxHash: settlement ? settlement.tx_hash : null,
-          quarantineReason: c.quarantine_reason.length > 0 ? c.quarantine_reason[0] ?? null : null,
-        };
-      });
+      return claims.map(toClaimView);
     } catch (e) {
       console.error('getMyClaims failed:', e);
       return [];
